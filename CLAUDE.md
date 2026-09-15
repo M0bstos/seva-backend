@@ -89,6 +89,7 @@ deno task test:api   # end-to-end API tests, needs a running stack
 - Before every commit, run `deno task check` and the tests for what changed. Never commit on red.
 - Never skip, disable or weaken a check or test to make it pass. Fix the cause. `// deno-lint-ignore` needs a one-line reason.
 - When asked for a clean check, run every check, then remove unused code, exports, files and dependencies, and report what was removed.
+- **Never run `supabase config push` against production while `[auth.sms.test_otp]` is in `config.toml`.** Those numbers accept a fixed code, so pushing them would let anyone sign in as them. They are local-only fixtures; production auth settings are changed in the dashboard (§9.3).
 
 ## Git
 
@@ -108,4 +109,4 @@ Commit at every reviewable checkpoint, so a bad change is easy to find and safe 
 - One infrastructure stack.
 - One reference or configuration file.
 
-Schema changes and Edge Function changes never share a commit. Every commit leaves `deno task check` and the tests for what it touched green, so `git revert` on any single commit still gives a working tree.
+Schema changes and Edge Function changes never share a commit. Every commit leaves the tests for what it touched green, and `deno task check` green whenever it changes a `.ts` file, so `git revert` on any single commit still gives a working tree. (`deno task check` errors with `No target files found` while the repo has no `.ts` files at all; that is expected until the first Edge Function exists.)
