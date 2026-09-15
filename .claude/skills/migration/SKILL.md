@@ -23,6 +23,7 @@ Steps 2–6 go in the same migration file. That is what makes a table reviewable
 ## Easy to get wrong
 
 - `(select auth.uid())`, not `auth.uid()` — the bare form re-evaluates once per row, and Supabase's advisor flags it.
+- Revoking `execute` from `anon, authenticated` without also revoking from `public` does nothing. Privileges granted to `PUBLIC` still reach both roles, and `has_function_privilege` — what the gates check — sees them. Always `revoke ... from public, anon, authenticated`. Then check whether `service_role` needed that privilege and grant it back explicitly.
 - PostGIS lives in `extensions`, so the type is `extensions.geography(point, 4326)`, and any `security definer` function must write `extensions.st_dwithin`, never `st_dwithin`, because `search_path` is pinned to `''`.
 - No polymorphic `subject_type`/`subject_id`. One nullable foreign key per target plus a `num_nonnulls()` check (§5.1).
 - Destructive changes take two releases: add the new structure and move the data, then remove the old one later.

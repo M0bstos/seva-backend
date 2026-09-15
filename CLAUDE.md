@@ -43,6 +43,7 @@ supabase start       # local stack (needs Docker)
 deno task check      # format check, lint, type-check functions
 deno task test       # Edge Function tests
 deno task db:test    # reset local db, lint it, run pgTAP including security gates
+deno task test:api   # end-to-end API tests, needs a running stack
 ```
 
 ## Code rules
@@ -65,7 +66,8 @@ deno task db:test    # reset local db, lint it, run pgTAP including security gat
 - `auto_expose_new_tables` is off. Grant every table explicitly, per role.
 - RLS on every table. One policy per operation, each with an explicit `to` role, using `(select auth.uid())`.
 - Functions are `security invoker` unless definer is required. Definer functions `set search_path = ''`, use schema-qualified names and check permissions first. Revoke `execute` from `public, anon, authenticated`; only `admin_*` functions are granted to `authenticated`. Mark functions `stable` or `immutable` when true.
-- Views use `with (security_invoker = true)`. Extensions go in the `extensions` schema.
+- Views use `with (security_invoker = true)`. Extensions go in the `extensions` schema, with one exception: `pgmq` refuses any schema but its own, so queues live in `pgmq` (§5.1).
+- Nothing in `private` or `pgmq` is ever granted to `anon` or `authenticated`. Gates 6 and 7 check this; gate 3 only sees `public`.
 - Points, verification, counts, content status and `profiles.avatar_path` are never client-writable (§9.2). Avatars are set by the moderation worker.
 - Never grant `anon` anything. Logged-out reads go through the `discover` function (§7.3), so gate 2 stays at zero rows.
 - No polymorphic `subject_type`/`subject_id` pairs. One nullable foreign key per target plus a `num_nonnulls()` check (§5.1).
