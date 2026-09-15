@@ -120,13 +120,18 @@ Three skills in `.claude/skills/` carry the procedures: `migration` for a table 
 
 ### Commit granularity
 
-Commit at every reviewable checkpoint, so a bad change is easy to find and safe to revert on its own. One commit is exactly one of these, never a mix:
+Commit at every reviewable checkpoint, so a bad change is easy to find and safe to revert on its own.
 
-- One migration: a table with its grants, RLS policies and indexes, plus its pgTAP denial tests.
-- One Postgres function, plus its pgTAP test.
+**A commit is one behavioural change, not one file.** One change often spans several files — a migration and its tests, or a rule written into both this file and the skill that carries it out — and those belong in a single commit. Conversely, two unrelated changes to the same file are two commits. The question to ask is "would someone revert these together?", not "are these the same file?".
+
+One commit is exactly one of these, never a mix:
+
+- One migration: a table with its grants, RLS policies and indexes, plus its tests.
+- One Postgres function, plus its test.
 - One Edge Function route group, or one worker.
 - One `_shared/` module.
 - One infrastructure stack.
-- One reference or configuration file.
+- One rule or convention, in every file that states it.
+- One document or reference deliverable.
 
 Schema changes and Edge Function changes never share a commit. Every commit leaves the tests for what it touched green, and `deno task check` green whenever it changes a `.ts` file, so `git revert` on any single commit still gives a working tree. (`deno task check` errors with `No target files found` while the repo has no `.ts` files at all; that is expected until the first Edge Function exists.)
