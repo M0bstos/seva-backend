@@ -14,11 +14,14 @@ select is_empty(
      from pg_class c
      join pg_namespace n on n.oid = c.relnamespace
      where n.nspname = 'public'
-       and c.relkind in ('r', 'p', 'v', 'm', 'f')
-       and (has_any_column_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
-         or has_table_privilege('anon', c.oid,
-              'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')) $$,
-  'anon has no table or column privilege in public'
+       and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+       and case when c.relkind = 'S'
+             then has_sequence_privilege('anon', c.oid, 'USAGE, SELECT, UPDATE')
+             else has_any_column_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+               or has_table_privilege('anon', c.oid,
+                    'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN')
+           end $$,
+  'anon has no table, column or sequence privilege in public'
 );
 
 select is_empty(
@@ -68,11 +71,14 @@ select is_empty(
      join pg_namespace n on n.oid = c.relnamespace
      cross join (values ('anon'::name), ('authenticated'::name)) as r (rolname)
      where n.nspname in ('private', 'pgmq', 'pgmq_public')
-       and c.relkind in ('r', 'p', 'v', 'm', 'f')
-       and (has_any_column_privilege(r.rolname, c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
-         or has_table_privilege(r.rolname, c.oid,
-              'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')) $$,
-  'clients have no table or column privilege in the private or queue schemas'
+       and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+       and case when c.relkind = 'S'
+             then has_sequence_privilege(r.rolname, c.oid, 'USAGE, SELECT, UPDATE')
+             else has_any_column_privilege(r.rolname, c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+               or has_table_privilege(r.rolname, c.oid,
+                    'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN')
+           end $$,
+  'clients have no table, column or sequence privilege in the private or queue schemas'
 );
 
 select * from finish();
