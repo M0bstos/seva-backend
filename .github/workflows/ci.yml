@@ -12,8 +12,8 @@ jobs:
   database:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: supabase/setup-cli@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
         with:
           version: 2.117.0
       - run: supabase db start
@@ -22,26 +22,29 @@ jobs:
 
   api:
     runs-on: ubuntu-latest
-    if: hashFiles('tests/api/**/*.ts') != ''
     steps:
-      - uses: actions/checkout@v7
-      - uses: supabase/setup-cli@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: supabase/setup-cli@46f7f98c7f948ad727d22c1e67fab04c223a0520 # v3.0.0
+        if: hashFiles('tests/api/**/*.ts') != ''
         with:
           version: 2.117.0
-      - uses: denoland/setup-deno@v2
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        if: hashFiles('tests/api/**/*.ts') != ''
         with:
-          deno-version: v2.x
+          deno-version: 2.9.6
       - run: supabase start
+        if: hashFiles('tests/api/**/*.ts') != ''
       - run: deno task test:api
+        if: hashFiles('tests/api/**/*.ts') != ''
 
   functions:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: denoland/setup-deno@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         if: hashFiles('supabase/functions/**/*.ts') != ''
         with:
-          deno-version: v2.x
+          deno-version: 2.9.6
       - run: deno task check
         if: hashFiles('supabase/functions/**/*.ts') != ''
       - run: deno task test
