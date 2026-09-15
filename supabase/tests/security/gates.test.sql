@@ -12,9 +12,8 @@ select is_empty(
 select is_empty(
   $$ select distinct table_name
      from information_schema.role_table_grants
-     where grantee = 'anon' and table_schema = 'public'
-       and table_name not in ('activities_public', 'campaigns_public') $$,
-  'anon can only read the public views'
+     where grantee = 'anon' and table_schema = 'public' $$,
+  'anon has no privileges on any table in public'
 );
 
 select is_empty(
