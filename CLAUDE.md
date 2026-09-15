@@ -14,6 +14,7 @@ Backend for SEVA v1, a social-impact platform built for an Indian government pro
 - Postgres 17 with PostGIS, Supabase Auth, Data API (PostgREST), Storage, Edge Functions (Deno 2, TypeScript), Queues (pgmq), Cron.
 - AWS: Rekognition, Bedrock Guardrails, SES, End User Messaging SMS, S3, CloudWatch.
 - Allowed dependencies: `npm:@supabase/supabase-js`, `npm:hono`, the `npm:@aws-sdk/client-*` packages for the AWS services above, and `jsr:@std/*`. Any other dependency or service needs the four checks in §3.3 and approval first.
+- Allowed tools outside the runtime: AWS CLI v2 and cfn-lint, both pinned. AWS infrastructure is CloudFormation YAML (§13.3); no Terraform, OpenTofu or CDK.
 
 ## Layout
 
@@ -22,11 +23,12 @@ Backend for SEVA v1, a social-impact platform built for an Indian government pro
 .github/workflows/  CI: database tests and function checks
 admin/appsmith/     exported admin app
 docs/               local only: the specification
-infra/aws/          IAM, S3, SES, SMS, guardrail, alarms, ops host
+infra/aws/          CloudFormation YAML, one stack per file (§13.3)
 reference/          api.md, openapi-functions.yaml, runbook.md (handover docs)
 supabase/
   config.toml       local project settings
-  migrations/       hand-written SQL migrations
+  seed.sql          synthetic local data
+  migrations/       hand-written SQL migrations, including bucket creation
   functions/        Edge Functions; shared code in _shared/
   tests/            pgTAP: security/ gates, rls/, rpc/, points/
 tests/              api/ end-to-end, languages/ moderation samples, load/ k6
@@ -64,7 +66,10 @@ deno task db:test    # reset local db, lint it, run pgTAP including security gat
 - RLS on every table. One policy per operation, each with an explicit `to` role, using `(select auth.uid())`.
 - Functions are `security invoker` unless definer is required. Definer functions `set search_path = ''`, use schema-qualified names and check permissions first. Revoke `execute` from `public, anon, authenticated`; only `admin_*` functions are granted to `authenticated`. Mark functions `stable` or `immutable` when true.
 - Views use `with (security_invoker = true)`. Extensions go in the `extensions` schema.
-- Points, verification, counts and content status are never client-writable (§9.2).
+- Points, verification, counts, content status and `profiles.avatar_path` are never client-writable (§9.2). Avatars are set by the moderation worker.
+- Never grant `anon` anything. Logged-out reads go through the `discover` function (§7.3), so gate 2 stays at zero rows.
+- No polymorphic `subject_type`/`subject_id` pairs. One nullable foreign key per target plus a `num_nonnulls()` check (§5.1).
+- v1 ships no views. If one is ever added it must be `with (security_invoker = true)` and must not be readable by `anon` (§9.1).
 - Every policy ships with a pgTAP denial test in `supabase/tests/rls/`.
 - Lowercase SQL keywords and snake_case identifiers.
 
@@ -85,7 +90,20 @@ deno task db:test    # reset local db, lint it, run pgTAP including security gat
 
 ## Git
 
-- One-line commit messages, imperative, 72 characters at most, e.g. `Add join_activity capacity lock`.
+- One-line commit messages, lowercase, imperative, 72 characters at most, e.g. `add join_activity capacity lock`.
 - No commit body, no `Co-Authored-By`, no trailers. `.githooks/commit-msg` rejects anything else.
-- One logical change per commit. Never commit secrets, `.env` files or anything in `docs/`.
+- Never commit secrets, `.env` files or anything in `docs/`.
 - Don't push, force-push, rewrite history or open pull requests unless asked.
+
+### Commit granularity
+
+Commit at every reviewable checkpoint, so a bad change is easy to find and safe to revert on its own. One commit is exactly one of these, never a mix:
+
+- One migration: a table with its grants, RLS policies and indexes, plus its pgTAP denial tests.
+- One Postgres function, plus its pgTAP test.
+- One Edge Function route group, or one worker.
+- One `_shared/` module.
+- One infrastructure stack.
+- One reference or configuration file.
+
+Schema changes and Edge Function changes never share a commit. Every commit leaves `deno task check` and the tests for what it touched green, so `git revert` on any single commit still gives a working tree.

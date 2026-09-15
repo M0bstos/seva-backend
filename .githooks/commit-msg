@@ -6,6 +6,10 @@ if [ "$lines" -ne 1 ]; then
   echo "commit-msg: use exactly one line" >&2
   exit 1
 fi
+if printf '%s' "$body" | grep -q '^[A-Z]'; then
+  echo "commit-msg: start with a lowercase letter" >&2
+  exit 1
+fi
 if printf '%s' "$body" | grep -qi 'co-authored-by'; then
   echo "commit-msg: no co-author trailers" >&2
   exit 1
