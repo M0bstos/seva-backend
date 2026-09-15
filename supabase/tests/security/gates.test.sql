@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(5);
+select plan(7);
 
 select is_empty(
   $$ select format('%I.%I', schemaname, tablename)
@@ -45,6 +45,24 @@ select is_empty(
        and not coalesce(array_to_string(c.reloptions, ',')
                         ~ 'security_invoker=(true|on)', false) $$,
   'views use security_invoker'
+);
+
+select is_empty(
+  $$ select n.nspname || '.' || p.proname
+     from pg_proc p
+     join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname in ('private', 'pgmq')
+       and (has_function_privilege('anon', p.oid, 'execute')
+         or has_function_privilege('authenticated', p.oid, 'execute')) $$,
+  'clients cannot execute private or queue functions'
+);
+
+select is_empty(
+  $$ select table_schema || '.' || table_name
+     from information_schema.role_table_grants
+     where table_schema in ('private', 'pgmq')
+       and grantee in ('anon', 'authenticated') $$,
+  'clients have no grants in the private or queue schemas'
 );
 
 select * from finish();
