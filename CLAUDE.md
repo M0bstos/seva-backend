@@ -72,7 +72,17 @@ deno task test:api   # end-to-end API tests, needs a running stack
 - Never grant `anon` anything. Logged-out reads go through the `discover` function (§7.3), so gate 2 stays at zero rows.
 - No polymorphic `subject_type`/`subject_id` pairs. One nullable foreign key per target plus a `num_nonnulls()` check (§5.1).
 - v1 ships no views. If one is ever added it must be `with (security_invoker = true)` and must not be readable by `anon` (§9.1).
-- Every policy ships with a pgTAP denial test in `supabase/tests/rls/`.
+- **Every table migration starts with a full revoke**, because a new table in `public` arrives carrying grants nobody asked for:
+
+  ```sql
+  revoke all on table <t> from public, anon, authenticated, service_role;
+  revoke all on sequence <t>_<column>_seq from public, anon, authenticated, service_role;
+  ```
+
+  `revoke all on table` does not touch that table's identity sequence, so the second line is not optional. Then grant exactly what §5.2 says and nothing more — including `service_role` for everything an Edge Function reaches through a `security invoker` function, and `usage` on the sequence for any role that has to insert.
+- **Every policy ships with its pgTAP denial tests in `supabase/tests/rls/`, plus one allow test** run as the role that is supposed to succeed.
+- **Every table ships with one test** proving `service_role` can do what its functions need.
+- Why both: a deny-all policy passes denial-only tests, and a missing grant would otherwise first show up as `permission denied` in an API test, a long way from the migration that caused it.
 - Lowercase SQL keywords and snake_case identifiers.
 
 ## Edge Function rules
