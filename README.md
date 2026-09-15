@@ -13,3 +13,4 @@ Supabase and AWS backend for SEVA v1. The specification is `docs/SEVA-backend-v1
 - `deno task check`: format, lint and type-check Edge Functions
 - `deno task test`: Edge Function tests
 - `deno task db:test`: reset the local database, lint it and run the pgTAP tests
+- `deno task test:api`: end-to-end API tests against the local stack
