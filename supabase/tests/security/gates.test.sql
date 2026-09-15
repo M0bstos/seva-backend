@@ -10,10 +10,15 @@ select is_empty(
 );
 
 select is_empty(
-  $$ select distinct table_name
-     from information_schema.role_table_grants
-     where grantee = 'anon' and table_schema = 'public' $$,
-  'anon has no privileges on any table in public'
+  $$ select c.oid::regclass::text
+     from pg_class c
+     join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public'
+       and c.relkind in ('r', 'p', 'v', 'm', 'f')
+       and (has_any_column_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+         or has_table_privilege('anon', c.oid,
+              'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')) $$,
+  'anon has no table or column privilege in public'
 );
 
 select is_empty(
@@ -51,18 +56,23 @@ select is_empty(
   $$ select n.nspname || '.' || p.proname
      from pg_proc p
      join pg_namespace n on n.oid = p.pronamespace
-     where n.nspname in ('private', 'pgmq')
+     where n.nspname in ('private', 'pgmq', 'pgmq_public')
        and (has_function_privilege('anon', p.oid, 'execute')
          or has_function_privilege('authenticated', p.oid, 'execute')) $$,
   'clients cannot execute private or queue functions'
 );
 
 select is_empty(
-  $$ select table_schema || '.' || table_name
-     from information_schema.role_table_grants
-     where table_schema in ('private', 'pgmq')
-       and grantee in ('anon', 'authenticated') $$,
-  'clients have no grants in the private or queue schemas'
+  $$ select r.rolname || ' -> ' || c.oid::regclass::text
+     from pg_class c
+     join pg_namespace n on n.oid = c.relnamespace
+     cross join (values ('anon'::name), ('authenticated'::name)) as r (rolname)
+     where n.nspname in ('private', 'pgmq', 'pgmq_public')
+       and c.relkind in ('r', 'p', 'v', 'm', 'f')
+       and (has_any_column_privilege(r.rolname, c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+         or has_table_privilege(r.rolname, c.oid,
+              'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')) $$,
+  'clients have no table or column privilege in the private or queue schemas'
 );
 
 select * from finish();
