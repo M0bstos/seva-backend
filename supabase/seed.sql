@@ -1,0 +1,1 @@
+-- Synthetic local data. Filled in with the first migration.
