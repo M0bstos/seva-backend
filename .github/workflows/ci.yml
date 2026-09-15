@@ -20,6 +20,20 @@ jobs:
       - run: supabase db lint --local --fail-on error
       - run: supabase test db
 
+  api:
+    runs-on: ubuntu-latest
+    if: hashFiles('tests/api/**/*.ts') != ''
+    steps:
+      - uses: actions/checkout@v7
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.117.0
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: supabase start
+      - run: deno task test:api
+
   functions:
     runs-on: ubuntu-latest
     steps:
