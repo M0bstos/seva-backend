@@ -91,6 +91,16 @@ deno task test:api   # end-to-end API tests, needs a running stack
 - When asked for a clean check, run every check, then remove unused code, exports, files and dependencies, and report what was removed.
 - **Never run `supabase config push` against production while `[auth.sms.test_otp]` is in `config.toml`.** Those numbers accept a fixed code, so pushing them would let anyone sign in as them. They are local-only fixtures; production auth settings are changed in the dashboard (§9.3).
 
+## Review before committing
+
+The agent that writes the code is never the agent that approves it. Three read-only reviewers live in `.claude/agents/`.
+
+- **Before every commit** that changes SQL, an Edge Function or a test, run `db-security` and `spec-conformance` on the diff. Each returns `PASS` or `BLOCK`. A `BLOCK` from either is fixed and re-reviewed before the commit happens.
+- **Run `compliance`** as well when the change touches retention, reports, moderation, account deletion, logging, minors, or anything that calls AWS. It never blocks; surface its open items to the user, because most need a program or legal decision rather than a code change.
+- Never skip a review because the change looks small, and never resolve a finding by weakening the check that produced it.
+
+Three skills in `.claude/skills/` carry the procedures: `migration` for a table migration, `route` for an Edge Function route group, `clean-check` for a full sweep. Use them rather than reinventing the steps.
+
 ## Git
 
 - One-line commit messages, lowercase, imperative, 72 characters at most, e.g. `add join_activity capacity lock`.
