@@ -1,0 +1,16 @@
+#!/bin/sh
+body=$(sed '/^# -* >8 -*$/,$d' "$1" | grep -v '^#' | grep -v '^[[:space:]]*$')
+lines=$(printf '%s\n' "$body" | grep -c .)
+
+if [ "$lines" -ne 1 ]; then
+  echo "commit-msg: use exactly one line" >&2
+  exit 1
+fi
+if printf '%s' "$body" | grep -qi 'co-authored-by'; then
+  echo "commit-msg: no co-author trailers" >&2
+  exit 1
+fi
+if [ "${#body}" -gt 72 ]; then
+  echo "commit-msg: keep it to 72 characters or fewer" >&2
+  exit 1
+fi

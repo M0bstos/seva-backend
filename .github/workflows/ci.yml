@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  database:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: supabase/setup-cli@v3
+        with:
+          version: 2.117.0
+      - run: supabase db start
+      - run: supabase db lint --local --fail-on error
+      - run: supabase test db
+
+  functions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2
+        if: hashFiles('supabase/functions/**/*.ts') != ''
+        with:
+          deno-version: v2.x
+      - run: deno task check
+        if: hashFiles('supabase/functions/**/*.ts') != ''
+      - run: deno task test
+        if: hashFiles('supabase/functions/**/*.ts') != ''

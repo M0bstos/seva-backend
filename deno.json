@@ -1,0 +1,18 @@
+{
+  "fmt": {
+    "lineWidth": 100,
+    "include": ["supabase/functions/", "tests/"]
+  },
+  "lint": {
+    "include": ["supabase/functions/", "tests/"],
+    "rules": {
+      "tags": ["recommended"]
+    }
+  },
+  "tasks": {
+    "fmt": "deno fmt",
+    "check": "deno fmt --check && deno lint && deno check supabase/functions",
+    "test": "deno test --allow-env --allow-net supabase/functions",
+    "db:test": "supabase db reset && supabase db lint --local --fail-on error && supabase test db"
+  }
+}
