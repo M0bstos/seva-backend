@@ -21,7 +21,7 @@
     "fmt": "deno fmt",
     "check": "deno fmt --check && deno lint && deno check supabase/functions",
     "test": "deno test --allow-env --allow-net supabase/functions",
-    "db:test": "supabase db reset && supabase db lint --local --fail-on error && supabase test db",
+    "db:test": "supabase db reset && supabase db lint --local --schema public,private --fail-on error && supabase test db",
     "test:api": "deno test --allow-env --allow-net tests/api"
   }
 }

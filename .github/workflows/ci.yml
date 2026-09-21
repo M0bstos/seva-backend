@@ -17,7 +17,8 @@ jobs:
         with:
           version: 2.117.0
       - run: supabase db start
-      - run: supabase db lint --local --fail-on error
+      # our schemas only: PostGIS's own plpgsql fails the linter. Keep in step with deno.json.
+      - run: supabase db lint --local --schema public,private --fail-on error
       - run: supabase test db
 
   api:
