@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(7);
+select plan(8);
 
 select is_empty(
   $$ select format('%I.%I', schemaname, tablename)
@@ -79,6 +79,16 @@ select is_empty(
                     'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN')
            end $$,
   'clients have no table, column or sequence privilege in the private or queue schemas'
+);
+
+-- The grants inside cron belong to supabase_admin and no migration can revoke them,
+-- so this asks the question a migration can get wrong: who can enter the schema.
+select is_empty(
+  $$ select r.rolname || ' -> cron'
+     from (values ('anon'::name), ('authenticated'::name)) as r (rolname)
+     join pg_namespace n on n.nspname = 'cron'
+     where has_schema_privilege(r.rolname, n.oid, 'usage') $$,
+  'clients have no usage on the cron schema'
 );
 
 select * from finish();
