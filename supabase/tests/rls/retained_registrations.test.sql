@@ -1,11 +1,13 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(5);
+select plan(6);
 
 insert into private.retained_registrations
-  (user_id, phone, email, account_created_at)
+  (user_id, phone, email, account_created_at,
+   terms_version, privacy_version, accepted_at)
 values ('11111111-1111-1111-1111-111111111111', '+919999999999',
-        'someone@example.com', now() - interval '400 days');
+        'someone@example.com', now() - interval '400 days',
+        '2026-10-01', '2026-10-01', now() - interval '399 days');
 
 select ok(
   not has_table_privilege('authenticated', 'private.retained_registrations',
@@ -34,6 +36,13 @@ select is_empty(
 select ok(
   (select relrowsecurity from pg_class where oid = 'private.retained_registrations'::regclass),
   'row level security is on regardless, so a later grant cannot open it by itself'
+);
+
+select results_eq(
+  $$ select terms_version, privacy_version, accepted_at is not null
+     from private.retained_registrations $$,
+  $$ values ('2026-10-01'::text, '2026-10-01'::text, true) $$,
+  'the record keeps which policy version was accepted and when, which erasure would otherwise destroy'
 );
 
 select results_eq(
