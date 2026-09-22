@@ -8,6 +8,7 @@ Backend for SEVA v1, a social-impact platform built for an Indian government pro
 - The decision register (§2.3, D1–D16) is settled. Don't propose alternatives unless asked.
 - If a task conflicts with the spec, or the spec doesn't cover it, stop and ask. Don't invent requirements.
 - If `docs/` is missing, ask for the spec instead of working from memory.
+- `docs/` is a git repository of its own, local and with no remote. Commit there after every amendment, in the same turn you make it, saying what changed and whether it records a measurement or a decision the owner gave. Without that history a reviewer can see a new sentence contradict an old one but cannot see that a sentence changed or was deleted.
 
 ## Stack
 
