@@ -13,11 +13,14 @@ Create the folder with `supabase functions new <name>` only when you are actuall
 
 1. Verify the token with `supabase.auth.getClaims()`.
 2. Validate the input.
-3. Check the kill switch and the rate limit.
-4. Call **one** Postgres function.
-5. Respond with the shared error shape (§7.1).
+3. Call **one** Postgres function, with the limit arguments from `_shared/limits.ts`.
+4. Respond with the shared error shape (§7.1).
 
 Take the user ID from the verified claims, never from the request body. One database round trip per request.
+
+**The kill switch and the rate limit are checked inside that one function, not ahead of it.** §12.2 makes the limit check a single upsert in the same call as the action, and reading `app_flags` separately would be the second round trip. The handler passes the caps; `private.check_rate_limit` returns null to proceed, or the §7.4 code to return as it stands.
+
+**Inside the function, eligibility comes before the count.** Onboarding, age and ownership are checked first, then the limiter. A refused request still counts (§12.2), so counting first would spend a cap on a request that could never succeed — and record an under-18 account's barred `POST /activities` attempts against it.
 
 No service layers, no repositories, no wrapper around a single call. Before extracting a helper, check whether a third caller exists yet; if not, inline it.
 
