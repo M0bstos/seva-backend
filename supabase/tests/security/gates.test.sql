@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(8);
+select plan(9);
 
 select is_empty(
   $$ select format('%I.%I', schemaname, tablename)
@@ -89,6 +89,28 @@ select is_empty(
      join pg_namespace n on n.nspname = 'cron'
      where has_schema_privilege(r.rolname, n.oid, 'usage') $$,
   'clients have no usage on the cron schema'
+);
+
+-- Gate 9. O16 opened the first grant outside public, private, pgmq and cron, and
+-- gates 2 and 7 are both blind to it: granting auth.users to authenticated leaves
+-- them at zero rows while handing every client every email, phone and password hash.
+-- anon and authenticated already hold usage on schema auth by Supabase default, so
+-- the absence of a table grant is the only thing standing in the way.
+select is_empty(
+  $$ select r.rolname || ' -> ' || c.oid::regclass::text
+     from pg_class c
+     join pg_namespace n on n.oid = c.relnamespace
+     cross join (values ('anon'::name), ('authenticated'::name)) as r (rolname)
+     where n.nspname = 'auth'
+       and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+       and case when c.relkind = 'S'
+             then has_sequence_privilege(r.rolname, c.oid, 'USAGE, SELECT, UPDATE')
+             else has_any_column_privilege(r.rolname, c.oid,
+                    'SELECT, INSERT, UPDATE, REFERENCES')
+               or has_table_privilege(r.rolname, c.oid,
+                    'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN')
+           end $$,
+  'clients have no table, column or sequence privilege in the auth schema'
 );
 
 select * from finish();
