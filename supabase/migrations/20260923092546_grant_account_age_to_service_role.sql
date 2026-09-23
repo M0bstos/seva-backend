@@ -1,0 +1,12 @@
+-- §17 O16: three abuse controls need the account's age — the 100-point cap in the
+-- first 7 days (§6.1), the 7-day-old reporter filter behind auto-hold (§8.5) and
+-- the 72-hour halving of rate limits (§7.3) — and §6.3 pins the source to
+-- auth.users.created_at.
+--
+-- auth.users is owned by supabase_auth_admin and postgres is not a member of it,
+-- but the table arrives as postgres=ar*wdDxtm/supabase_auth_admin: the r* is select
+-- with grant option, so this migration can pass on a read and nothing else. Two
+-- columns, so phone, email and encrypted_password stay unreachable — a column grant
+-- rather than a security definer helper, because no gate can inspect a definer body
+-- and every gate can inspect a grant.
+grant select (id, created_at) on table auth.users to service_role;
