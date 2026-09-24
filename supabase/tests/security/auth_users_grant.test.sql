@@ -42,13 +42,15 @@ select is_empty(
   'and the client roles gain nothing: the Data API never exposes auth anyway'
 );
 
--- grant all is eight privileges and a column grant is invisible to has_table_privilege;
--- the grant-option dimension is invisible to both. With it, anyone holding the secret
--- key could widen this read to authenticated permanently.
+-- With a grant option, anyone holding the secret key could widen this read to
+-- authenticated permanently. Only the table-level form is reachable: Postgres refuses
+-- a column-level one here with "grant options cannot be granted back to your own
+-- grantor", because postgres holds its own r* by grant from supabase_auth_admin. So
+-- this reads relacl, where the reachable state would actually land.
 select is_empty(
-  $$ select a.attname from pg_attribute a
-     where a.attrelid = 'auth.users'::regclass and a.attnum > 0 and not a.attisdropped
-       and array_to_string(a.attacl, ',') like '%service_role=r*%' $$,
+  $$ select 'auth.users' from pg_class
+     where oid = 'auth.users'::regclass
+       and array_to_string(relacl, ',') like '%service_role=r*%' $$,
   'and service_role cannot pass the read on: it holds no grant option'
 );
 

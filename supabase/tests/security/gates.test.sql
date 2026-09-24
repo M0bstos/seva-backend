@@ -91,7 +91,9 @@ select is_empty(
   'clients have no usage on the cron schema'
 );
 
--- Gate 9. O16 opened the first grant outside public, private, pgmq and cron, and
+-- Gate 11. §17.1 already reserved 9 for the exposed-schemas gate and 10 for the
+-- policy-initplan one, both still unwritten, so this takes the next free number.
+-- O16 opened the first grant outside public, private, pgmq and cron, and
 -- gates 2 and 7 are both blind to it: granting auth.users to authenticated leaves
 -- them at zero rows while handing every client every email, phone and password hash.
 -- anon and authenticated already hold usage on schema auth by Supabase default, so
