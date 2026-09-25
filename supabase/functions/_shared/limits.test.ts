@@ -1,5 +1,5 @@
-import { assertEquals } from "jsr:@std/assert@1.0.19";
-import { limitArgs } from "./limits.ts";
+import { assertEquals, assertRejects } from "jsr:@std/assert@1.0.19";
+import { addressSubject, limitArgs } from "./limits.ts";
 import { LIMITS, type Window } from "./limits.constants.ts";
 
 const USER = "11111111-1111-1111-1111-111111111111";
@@ -88,11 +88,69 @@ Deno.test("each route counts in its own bucket, and each person in their own", (
 
 // §7.3 limits discover "per person or IP", and serves logged-out callers, where there
 // is no account for the 72-hour halving to read (§17.1).
-Deno.test("an anonymous caller is counted by address and is never treated as young", () => {
-  const args = limitArgs("discover", "203.0.113.7", null);
-  assertEquals(args.p_bucket, "discover:203.0.113.7");
+Deno.test("an anonymous caller is counted by subject and is never treated as young", () => {
+  const args = limitArgs("discover", "opaque-subject", null);
+  assertEquals(args.p_bucket, "discover:opaque-subject");
   assertEquals(args.p_user_id, null);
   assertEquals(args.p_per_minute, 60);
+});
+
+// §17 O26: the address itself never reaches the database.
+Deno.test("an address is keyed by HMAC, never written through", async () => {
+  Deno.env.set("SEVA_RATE_LIMIT_SALT", "a-test-salt");
+  const subject = await addressSubject("203.0.113.7");
+  assertEquals(subject.length, 64);
+  assertEquals(/^[0-9a-f]+$/.test(subject), true);
+  assertEquals(subject.includes("203.0.113.7"), false);
+  assertEquals(await addressSubject("203.0.113.7"), subject, "same address, same bucket");
+  assertEquals(
+    (await addressSubject("203.0.113.8")) === subject,
+    false,
+    "different addresses are counted apart",
+  );
+
+  // A different deployment must not produce the same pseudonym for the same address.
+  Deno.env.set("SEVA_RATE_LIMIT_SALT", "another-salt");
+  assertEquals((await addressSubject("203.0.113.7")) === subject, false);
+});
+
+// One client, one bucket: a /64 is an ordinary residential IPv6 allocation, so
+// without normalising, varying the low half buys a fresh budget every request.
+Deno.test("one client gets one bucket, whatever they vary below the /64", async () => {
+  Deno.env.set("SEVA_RATE_LIMIT_SALT", "a-test-salt");
+  const first = await addressSubject("2001:db8:abcd:1234::1");
+  for (
+    const variant of [
+      "2001:db8:abcd:1234::2",
+      "2001:db8:abcd:1234:ffff:ffff:ffff:ffff",
+      "2001:DB8:ABCD:1234::9",
+      "2001:db8:abcd:1234::1%eth0",
+    ]
+  ) {
+    assertEquals(await addressSubject(variant), first, variant);
+  }
+  // A different /64 is a different client.
+  assertEquals((await addressSubject("2001:db8:abcd:9999::1")) === first, false);
+});
+
+Deno.test("an address written two ways is one client", async () => {
+  Deno.env.set("SEVA_RATE_LIMIT_SALT", "a-test-salt");
+  assertEquals(
+    await addressSubject("::ffff:203.0.113.7"),
+    await addressSubject("203.0.113.7"),
+    "an IPv4-mapped address is the IPv4 it wraps",
+  );
+  assertEquals(
+    await addressSubject(" 203.0.113.7 "),
+    await addressSubject("203.0.113.7"),
+    "and surrounding space is not a second client",
+  );
+});
+
+// Defaulting the salt would make the hash a lookup table over the IPv4 space.
+Deno.test("a missing salt fails loudly rather than hashing with a constant", async () => {
+  Deno.env.delete("SEVA_RATE_LIMIT_SALT");
+  await assertRejects(() => addressSubject("203.0.113.7"), Error, "SEVA_RATE_LIMIT_SALT");
 });
 
 Deno.test("the two routes §7.3 does not rate limit have no entry", () => {
