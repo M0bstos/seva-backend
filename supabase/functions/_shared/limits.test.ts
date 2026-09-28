@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from "jsr:@std/assert@1.0.19";
-import { addressSubject, limitArgs } from "./limits.ts";
+import { addressSubject, clientAddress, limitArgs } from "./limits.ts";
 import { LIMITS, type Window } from "./limits.constants.ts";
 
 const USER = "11111111-1111-1111-1111-111111111111";
@@ -159,4 +159,38 @@ Deno.test("the two routes §7.3 does not rate limit have no entry", () => {
   const names = Object.keys(LIMITS);
   assertEquals(names.includes("account.onboarding"), false);
   assertEquals(names.includes("discover.health"), false);
+});
+
+Deno.test("the address is the one the platform's proxy appended, not the caller's", () => {
+  // A caller who sends their own header has it prepended, so the last entry is ours.
+  assertEquals(
+    clientAddress(new Headers({ "x-forwarded-for": "10.0.0.1, 203.0.113.7" })),
+    "203.0.113.7",
+  );
+  assertEquals(clientAddress(new Headers({ "x-forwarded-for": "203.0.113.7" })), "203.0.113.7");
+});
+
+Deno.test("an authority is unwrapped to the address inside it", () => {
+  assertEquals(
+    clientAddress(new Headers({ "x-forwarded-for": "203.0.113.7:41234" })),
+    "203.0.113.7",
+  );
+  assertEquals(
+    clientAddress(new Headers({ "x-forwarded-for": "[2001:db8::1]:443" })),
+    "2001:db8::1",
+  );
+});
+
+Deno.test("no header means one shared bucket, not a refusal (§7.3)", () => {
+  assertEquals(clientAddress(new Headers()), "unknown");
+  assertEquals(clientAddress(new Headers({ "x-forwarded-for": "  " })), "unknown");
+});
+
+Deno.test("one /64 is one bucket however its zeros are written (§12.2)", async () => {
+  Deno.env.set("SEVA_RATE_LIMIT_SALT", "a-test-salt");
+  const padded = await addressSubject("2001:0db8:abcd:1234::1");
+  const short = await addressSubject("2001:db8:abcd:1234::1");
+  const expanded = await addressSubject("2001:db8:abcd:1234:0:0:0:1");
+  assertEquals(padded, short);
+  assertEquals(short, expanded);
 });

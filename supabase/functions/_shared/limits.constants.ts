@@ -30,3 +30,24 @@ export const LIMITS = {
   "discover.campaign": { perMinute: 60 },
   "feed": { perMinute: 60 },
 } satisfies Record<string, Window>;
+
+// §7.3 limits four of the five public routes "per person or IP" — `/discover/health`
+// is the exempt one (§12.5). The address comes from the
+// header the platform's own proxy appends, because the peer address is that proxy:
+// measured against supabase-edge-runtime 1.74.3, `Deno.serve`'s conn info gives
+// `remoteAddr.hostname = "0.0.0.0"` for every caller, while this header carries the
+// real one. A caller may send the header themselves, so only the **last** entry is
+// read — a proxy appends, so anything the caller wrote sits to the left of it.
+export const FORWARDED_FOR_HEADER = "x-forwarded-for";
+
+// When the header is absent there is no caller to tell apart, and every such request
+// shares one bucket. Be clear about what that is: past §7.3's 60/min the shared
+// bucket refuses everyone, so it is an outage of the four public routes much like
+// refusing outright would be, and the first 60 requests a minute still serve.
+//
+// It is not self-diagnosing either. This name is hashed like any address (`O26`), so
+// the counter row reads `discover:<hmac>` and an operator cannot find it by eye; the
+// salt rotates every 90 days (§9.5), after which older rows cannot be attributed to
+// it at all. §12.6's "Request flood" step is where that digest has to be recomputed
+// to tell this state from an ordinary flood.
+export const UNKNOWN_ADDRESS = "unknown";

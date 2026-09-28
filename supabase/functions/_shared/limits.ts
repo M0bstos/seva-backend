@@ -1,4 +1,4 @@
-import { LIMITS, type Window } from "./limits.constants.ts";
+import { FORWARDED_FOR_HEADER, LIMITS, UNKNOWN_ADDRESS, type Window } from "./limits.constants.ts";
 
 export type LimitName = keyof typeof LIMITS;
 
@@ -16,6 +16,24 @@ export function limitArgs(name: LimitName, subject: string, userId: string | nul
   };
 }
 
+// The caller's address as the platform saw it. The last entry, never the first: the
+// proxy appends, so a caller who sent their own `x-forwarded-for` has it sitting to
+// the left of the one that can be trusted.
+//
+// A bracketed or port-suffixed entry is unwrapped here rather than in
+// `normaliseAddress`, which reads an address and not an authority.
+export function clientAddress(headers: Headers): string {
+  const chain = headers.get(FORWARDED_FOR_HEADER);
+  const last = chain?.split(",").at(-1)?.trim();
+  if (!last) return UNKNOWN_ADDRESS;
+
+  const bracketed = last.match(/^\[(.+)\](?::\d+)?$/);
+  if (bracketed) return bracketed[1];
+
+  const withPort = last.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/);
+  return withPort ? withPort[1] : last;
+}
+
 // One client must map to one bucket, or §7.3's "per person or IP" cap counts nothing:
 // an ordinary residential IPv6 allocation is a /64, so a caller who varies the low
 // half gets a fresh budget every request, and `::ffff:203.0.113.7` is the same client
@@ -28,7 +46,11 @@ function normaliseAddress(ip: string): string {
   if (!address.includes(":")) return address;
 
   const groups = expandIpv6(address);
-  return groups ? `${groups.slice(0, 4).join(":")}::/64` : address;
+  if (!groups) return address;
+  // Leading zeros are dropped before the halves are compared as text, or
+  // `2001:0db8::1` and `2001:db8::1` would be two buckets for one /64. Proxies emit
+  // the canonical form, so this is hardening rather than a live split.
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, "")).join(":")}::/64`;
 }
 
 // Returns the eight groups of an IPv6 address, or null if it is not one this
