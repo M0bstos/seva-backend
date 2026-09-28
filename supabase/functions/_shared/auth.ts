@@ -1,5 +1,6 @@
 import { isAuthRetryableFetchError, type SupabaseClient } from "npm:@supabase/supabase-js@2.116.0";
 import { VERIFIABLE_ALGORITHMS } from "./auth.constants.ts";
+import { fail } from "./errors.ts";
 
 // Only the one method is needed, and naming it keeps the verifier substitutable in
 // tests without casting a whole client.
@@ -70,4 +71,35 @@ async function verifyClaims(db: ClaimsVerifier, token: string) {
 
   if (isAuthRetryableFetchError(result.error)) throw result.error;
   return result.error || !result.data ? null : result.data.claims;
+}
+
+// The two ways a route asks who is calling. Both answer either a user id or the
+// Response to send as it stands, so a handler's first line is the same everywhere
+// (§13.4) and no route invents its own reading of §7.4.
+
+// For the routes §7.3 gives to "Signed in" or "Onboarded".
+export async function requiredCaller(
+  db: ClaimsVerifier,
+  authorization: string | undefined,
+): Promise<string | Response> {
+  return await optionalCaller(db, authorization) ?? fail("UNAUTHENTICATED");
+}
+
+// For the four `discover` routes, which §7.3 gives to "Anyone". No header means an
+// anonymous caller, which §12.2 counts by address instead (`O26`). A header that does
+// not verify is **not** anonymous: §7.4 has UNAUTHENTICATED for "No valid session",
+// and serving that caller anonymously would hide a broken session from them.
+export async function optionalCaller(
+  db: ClaimsVerifier,
+  authorization: string | undefined,
+): Promise<string | null | Response> {
+  if (authorization === undefined) return null;
+  try {
+    return await verifiedUserId(db, authorization) ?? fail("UNAUTHENTICATED");
+  } catch {
+    // Only a transport failure while verifying a token this project could have issued
+    // reaches here. Answering 401 would tell every signed-in person to sign in again
+    // for the length of the outage, which `O32` is the alarm for.
+    return fail("INTERNAL");
+  }
 }
