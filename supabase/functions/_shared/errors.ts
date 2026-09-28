@@ -32,3 +32,27 @@ export function fail(code: ErrorCode, detail?: string | number): Response {
     { status: known.status, headers },
   );
 }
+
+// §17.1 fixes the shape a route's one Postgres function answers a refusal with:
+// {"error": "<§7.4 code>"} and, where the code needs it, `retry_after` or `field`.
+// Anything else is a success payload, which is what null means here.
+//
+// A code the table does not hold is a fault in the function that sent it, not in the
+// request, so it answers INTERNAL rather than reaching a client as an unknown code.
+export function refusal(answer: Record<string, unknown> | null): Response | null {
+  const code = answer?.error;
+  if (typeof code !== "string") return null;
+  if (!Object.hasOwn(ERRORS, code)) return fail("INTERNAL");
+
+  if (code === "RATE_LIMITED" || code === "DAILY_LIMIT_REACHED") {
+    const seconds = answer?.retry_after;
+    return fail(code, typeof seconds === "number" ? seconds : 1);
+  }
+  if (code === "VALIDATION_FAILED") {
+    const field = answer?.field;
+    // §7.4 has the message name the field. A refusal that forgot to say which one
+    // still has to answer 400, so it names the request rather than inventing a field.
+    return fail(code, typeof field === "string" ? field : "request");
+  }
+  return fail(code as Exclude<ErrorCode, ThrottledCode | "VALIDATION_FAILED">);
+}

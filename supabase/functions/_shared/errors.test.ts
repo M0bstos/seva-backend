@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert@1.0.19";
-import { fail } from "./errors.ts";
+import { fail, refusal } from "./errors.ts";
 import { ERRORS } from "./errors.constants.ts";
 
 // §7.4, copied from the spec so a changed status fails here rather than in a client.
@@ -79,4 +79,44 @@ Deno.test("and no other code will take a Retry-After from one either", () => {
     if (status === 429) continue;
     assertEquals(anyCode(code, 30).headers.get("Retry-After"), null, code);
   }
+});
+
+Deno.test("a refusal from Postgres becomes the §7.4 answer it names", async () => {
+  const response = refusal({ error: "ACTIVITY_FULL" });
+  assertEquals(response?.status, 409);
+  assertEquals(await response?.json(), {
+    error: {
+      code: "ACTIVITY_FULL",
+      message: "This activity has reached its capacity.",
+      retryable: false,
+    },
+  });
+});
+
+Deno.test("a success payload is not a refusal (§17.1)", () => {
+  assertEquals(refusal({ replayed: false, act: { id: "a" } }), null);
+  assertEquals(refusal(null), null);
+});
+
+Deno.test("retry_after rides through to the header (§7.1)", () => {
+  assertEquals(
+    refusal({ error: "RATE_LIMITED", retry_after: 42 })?.headers.get("Retry-After"),
+    "42",
+  );
+  // A 429 with no seconds still has to carry the header, so it asks for one second.
+  assertEquals(refusal({ error: "DAILY_LIMIT_REACHED" })?.headers.get("Retry-After"), "1");
+});
+
+Deno.test("VALIDATION_FAILED names the field the function named (§7.4)", async () => {
+  const named = await refusal({ error: "VALIDATION_FAILED", field: "cursor" })?.json();
+  assertEquals(named.error.message, "cursor is missing or malformed.");
+  // A refusal that forgot the field still answers 400 rather than 500.
+  const unnamed = await refusal({ error: "VALIDATION_FAILED" })?.json();
+  assertEquals(unnamed.error.message, "request is missing or malformed.");
+});
+
+Deno.test("a code §7.4 does not hold is the function's fault, not the caller's", async () => {
+  const response = refusal({ error: "TEAPOT" });
+  assertEquals(response?.status, 500);
+  assertEquals((await response?.json()).error.code, "INTERNAL");
 });
