@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(14);
+select plan(15);
 
 insert into auth.users (id, created_at)
 select ('00000000-0000-0000-0000-00000000000' || n)::uuid, now() - interval '30 days'
@@ -213,6 +213,14 @@ select is(
    where s.r ->> 'error' = 'RATE_LIMITED'),
   1,
   'the limiter runs inside the same call (§12.2)'
+);
+
+-- The same int4 overflow. `O30` gave Feed one rung fewer, starting at 5 km, but both
+-- ladders top out at 50, so the band is identical (§12.6).
+select lives_ok(
+  $$ select feed_acts('00000000-0000-0000-0000-000000000001', 73.8567, 18.5204,
+       -2147483648, null, null, 10, 'feed:m', 60, null, null) $$,
+  'int4''s floor snaps rather than raising (§12.2, §12.6)'
 );
 
 select * from finish();

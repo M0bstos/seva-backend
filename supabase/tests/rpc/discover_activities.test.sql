@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(16);
+select plan(18);
 
 insert into auth.users (id, created_at)
 select ('00000000-0000-0000-0000-00000000000' || n)::uuid, now() - interval '30 days'
@@ -222,6 +222,26 @@ select is(
    where s.r ->> 'error' = 'RATE_LIMITED'),
   1,
   'the limiter runs inside the same call, and a read is metered like any other (§12.2)'
+);
+
+-- The snap has to answer every value the `int` parameter accepts. It did not: both
+-- sides of `abs(rung - p_radius_km)` were int4, so the 51 values from -2147483648 to
+-- -2147483598 raised `integer out of range` inside the body — and the raise rolled
+-- back the limiter's own upsert with it, leaving an unbilled retryable 500 on a route
+-- §7.3 gives to "Anyone" (§12.2's D5 note). Fixed by widening the arithmetic.
+select lives_ok(
+  $$ select discover_activities(null, 73.8567, 18.5204, -2147483648, null, null, null,
+       null, 10, 'discover:q', 60, null, null) $$,
+  'int4''s floor snaps rather than raising (§12.2, §12.6)'
+);
+
+select is(
+  (select jsonb_agg(e->>'title')
+   from jsonb_array_elements(
+     discover_activities(null, 73.8567, 18.5204, -2147483648, null, null, null, null, 10,
+       'discover:r', 60, null, null) -> 'activities') e),
+  '["Riverside cleanup", "Shelter morning"]'::jsonb,
+  'and lands on the narrowest rung: this is the entry the 3 km call wrote (§7.3)'
 );
 
 select * from finish();
