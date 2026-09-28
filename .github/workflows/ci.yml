@@ -35,6 +35,10 @@ jobs:
           deno-version: 2.9.6
       - run: supabase start
         if: hashFiles('tests/api/**/*.ts') != ''
+        env:
+          # Local-only value for the per-address limiter hash (§17 O26). The real one
+          # is a function secret on the hosted project (§9.5).
+          SEVA_RATE_LIMIT_SALT: ci-rate-limit-salt
       - run: deno task test:api
         if: hashFiles('tests/api/**/*.ts') != ''
 

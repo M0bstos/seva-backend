@@ -393,8 +393,13 @@ inspector_port = 8083
 # The Deno major version to use.
 deno_version = 2
 
-# [edge_runtime.secrets]
-# secret_key = "env(SECRET_VALUE)"
+# Function secrets for the local stack and CI. On a hosted project these are set as
+# function secrets (§9.5) and this block is not pushed. The salt keys the per-address
+# limiter hash (§17 `O26`); without it every anonymous `discover` request fails at the
+# hash rather than counting, so `supabase start` alone could not serve §7.3's public
+# routes and the API tests could not run.
+[edge_runtime.secrets]
+SEVA_RATE_LIMIT_SALT = "env(SEVA_RATE_LIMIT_SALT)"
 
 # §7.3 sets verify_jwt per function: `acts`, `activities`, `uploads`, `reports`,
 # `account` and `feed` are true, `discover`, `sms-hook` and the three workers false.
