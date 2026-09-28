@@ -41,8 +41,18 @@ begin
 end
 $$;
 
+-- Scoped to this test's own three fixtures. Reading the whole table made the
+-- assertion depend on what every other session had left inside its 60 seconds — and
+-- `deno task test:api` commits real cache rows, so CI running both suites against one
+-- stack could fail this on ordering alone, with nothing to do with the change.
 select results_eq(
-  $$ select cache_key from private.discover_cache order by cache_key $$,
+  $$ select cache_key from private.discover_cache
+     where cache_key in (
+       'discover:POINT(73.86 18.52):5:::::10',
+       'discover:POINT(73.86 18.52):5::::expired:10',
+       'feed:POINT(73.85 18.5):5:::10'
+     )
+     order by cache_key $$,
   $$ values ('discover:POINT(73.86 18.52):5:::::10'::text) $$,
   'every entry past its 60 seconds is gone, and the live one stays (§7.3)'
 );
