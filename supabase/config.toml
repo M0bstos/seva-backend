@@ -396,6 +396,38 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+# §7.3 sets verify_jwt per function: `acts`, `activities`, `uploads`, `reports`,
+# `account` and `feed` are true, `discover`, `sms-hook` and the three workers false.
+# A function that sets it true still calls getClaims(), because the platform check
+# proves a token was signed by this project while §9.2 needs the user id out of the
+# verified claims.
+#
+# Each function carries an empty import map: the CLI expects the file to exist, and
+# every specifier in this repo is pinned in the source (§3.3), so there is nothing
+# for it to map.
+[functions.acts]
+enabled = true
+verify_jwt = true
+import_map = "./functions/acts/deno.json"
+
+[functions.activities]
+enabled = true
+verify_jwt = true
+import_map = "./functions/activities/deno.json"
+
+# False because this function serves logged-out callers (§7.3). A token that is sent
+# is still verified in code, and one that does not verify is answered UNAUTHENTICATED
+# rather than served anonymously.
+[functions.discover]
+enabled = true
+verify_jwt = false
+import_map = "./functions/discover/deno.json"
+
+[functions.feed]
+enabled = true
+verify_jwt = true
+import_map = "./functions/feed/deno.json"
+
 [analytics]
 enabled = true
 port = 54327
@@ -425,3 +457,6 @@ enabled = true
 # formatted with uppercase keywords, indent 2, max width 180, trailing commas,
 # and column/key alignment. Set to "null" to emit raw, unformatted SQL.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":180,\"commaStyle\":\"trailing\"}"
+
+
+
