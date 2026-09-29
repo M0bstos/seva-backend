@@ -1,6 +1,6 @@
 import { ERRORS, RETRY_AFTER_HEADER } from "./errors.constants.ts";
 
-export type ErrorCode = keyof typeof ERRORS;
+type ErrorCode = keyof typeof ERRORS;
 
 // §7.1 attaches Retry-After to the 429s, so the seconds are an argument a route
 // cannot forget rather than an option it may leave out.

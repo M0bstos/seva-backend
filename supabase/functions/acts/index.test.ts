@@ -100,27 +100,6 @@ Deno.test("null reads as absent on every optional field (§7.1.1)", () => {
   assertEquals(firstProblem(act({ activity_id: "nope" })), "activity_id");
 });
 
-// `update_act` coalesces, so `null` keeps the column exactly as a missing field does.
-// The PATCH handler tested `undefined` alone, which made the two spellings a 403 and
-// a 400 on the same route (§7.1.1).
-Deno.test("PATCH reads null as absent, like every other optional field", async () => {
-  const cases: Array<[Record<string, unknown>, number]> = [
-    [{ title: null, story: "We filled eleven sacks along the bank before the rain came." }, 401],
-    [{ title: null, story: null }, 401],
-    [{}, 401],
-  ];
-  for (const [body, status] of cases) {
-    const response = await app.request(`/acts/${KEY}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    });
-    // No session, so every one of these stops at the token check — what matters is
-    // that none of them is a 400 from a spelling difference. The field-level
-    // behaviour is pinned end to end in tests/api.
-    assertEquals(response.status, status);
-  }
-});
-
 Deno.test("a NUL or a nested metric is refused before Postgres logs it (§9.8, §12.2)", () => {
   assertEquals(firstProblem(act({ title: "A morning\u0000at the river" })), "title");
   assertEquals(

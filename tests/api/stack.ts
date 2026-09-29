@@ -3,7 +3,7 @@
 // secret: these are the local development keys, and the real ones live in function
 // secrets (§9.5). An environment variable wins, so the same suite can be pointed at
 // a staging project (§12.7).
-export type Stack = { url: string; publishableKey: string; secretKey: string };
+type Stack = { url: string; publishableKey: string; secretKey: string };
 
 let cached: Stack | null = null;
 
