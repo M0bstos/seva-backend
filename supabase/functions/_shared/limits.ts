@@ -1,4 +1,10 @@
-import { FORWARDED_FOR_HEADER, LIMITS, UNKNOWN_ADDRESS, type Window } from "./limits.constants.ts";
+import {
+  ADDRESS_HEADERS,
+  FORWARDED_FOR_HEADER,
+  LIMITS,
+  UNKNOWN_ADDRESS,
+  type Window,
+} from "./limits.constants.ts";
 
 export type LimitName = keyof typeof LIMITS;
 
@@ -16,22 +22,33 @@ export function limitArgs(name: LimitName, subject: string, userId: string | nul
   };
 }
 
-// The caller's address as the platform saw it. The last entry, never the first: the
-// proxy appends, so a caller who sent their own `x-forwarded-for` has it sitting to
-// the left of the one that can be trusted.
+// The caller's address as the platform saw it, from the most platform-specific header
+// that carries one. Every source in the chain is measured unforgeable (see the
+// constants file); what is **not** used is the last `x-forwarded-for` entry, which is
+// an infrastructure hop that rotates between requests.
 //
 // A bracketed or port-suffixed entry is unwrapped here rather than in
 // `normaliseAddress`, which reads an address and not an authority.
 export function clientAddress(headers: Headers): string {
-  const chain = headers.get(FORWARDED_FOR_HEADER);
-  const last = chain?.split(",").at(-1)?.trim();
-  if (!last) return UNKNOWN_ADDRESS;
+  for (const name of ADDRESS_HEADERS) {
+    const value = headers.get(name)?.trim();
+    if (value) return unwrap(value);
+  }
 
-  const bracketed = last.match(/^\[(.+)\](?::\d+)?$/);
+  // The first entry, because a forged `x-forwarded-for` is discarded by the platform
+  // rather than prepended to it. Local stacks send a single entry, so this serves
+  // both. If a deployment ever passes a caller's own header through, this is the line
+  // that would trust it.
+  const first = headers.get(FORWARDED_FOR_HEADER)?.split(",")[0]?.trim();
+  return first ? unwrap(first) : UNKNOWN_ADDRESS;
+}
+
+function unwrap(entry: string): string {
+  const bracketed = entry.match(/^\[(.+)\](?::\d+)?$/);
   if (bracketed) return bracketed[1];
 
-  const withPort = last.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/);
-  return withPort ? withPort[1] : last;
+  const withPort = entry.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/);
+  return withPort ? withPort[1] : entry;
 }
 
 // One client must map to one bucket, or §7.3's "per person or IP" cap counts nothing:

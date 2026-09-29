@@ -32,18 +32,30 @@ export const LIMITS = {
 } satisfies Record<string, Window>;
 
 // §7.3 limits four of the five public routes "per person or IP" — `/discover/health`
-// is the exempt one (§12.5). The address comes from the
-// header the platform's own proxy appends, because the peer address is that proxy:
-// measured against supabase-edge-runtime 1.74.3, `Deno.serve`'s conn info gives
-// `remoteAddr.hostname = "0.0.0.0"` for every caller, while this header carries the
-// real one. A caller may send the header themselves, so only the **last** entry is
-// read — a proxy appends, so anything the caller wrote sits to the left of it.
+// is the exempt one (§12.5). Where the address comes from is measured against the
+// hosted platform, 29 September 2026, because every part of it was guessed wrong once:
+//
+//   * `sb-forwarded-for` is Supabase's own header and holds exactly the caller's
+//     address. Sending one is useless — the platform overwrites it.
+//   * `cf-connecting-ip` holds the same value; forging it is worse than useless, as
+//     Cloudflare answers 403 at the edge before the function runs.
+//   * `x-forwarded-for` arrives as `<caller>,<caller>, <hop>`. A forged one is
+//     **discarded entirely**, so its *first* entry is the caller and is trustworthy —
+//     but its **last** entry is an AWS hop that *rotates between requests*
+//     (99.82.173.144 and 99.82.173.173 seen minutes apart). Reading the last entry,
+//     as this file did until the measurement, would have bucketed every anonymous
+//     caller in the world into a handful of rotating buckets.
+//
+// The chain is ordered by how specific each one is to the platform we run on. Locally
+// only `x-forwarded-for` exists, single-entry, so the first-entry rule serves both.
+export const ADDRESS_HEADERS = ["sb-forwarded-for", "cf-connecting-ip"] as const;
+
 export const FORWARDED_FOR_HEADER = "x-forwarded-for";
 
-// When the header is absent there is no caller to tell apart, and every such request
-// shares one bucket. Be clear about what that is: past §7.3's 60/min the shared
-// bucket refuses everyone, so it is an outage of the four public routes much like
-// refusing outright would be, and the first 60 requests a minute still serve.
+// When no header carries an address there is no caller to tell apart, and every such
+// request shares one bucket. Be clear about what that is: past §7.3's 60/min the
+// shared bucket refuses everyone, so it is an outage of the four public routes much
+// like refusing outright would be, and the first 60 requests a minute still serve.
 //
 // It is not self-diagnosing either. This name is hashed like any address (`O26`), so
 // the counter row reads `discover:<hmac>` and an operator cannot find it by eye; the

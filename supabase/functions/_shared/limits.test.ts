@@ -161,18 +161,44 @@ Deno.test("the two routes §7.3 does not rate limit have no entry", () => {
   assertEquals(names.includes("discover.health"), false);
 });
 
-Deno.test("the address is the one the platform's proxy appended, not the caller's", () => {
-  // A caller who sends their own header has it prepended, so the last entry is ours.
+// Measured against the hosted platform, 29 September 2026. Every header below is
+// overwritten or discarded if a caller sends one, and `x-forwarded-for` arrives as
+// `<caller>,<caller>, <hop>` — so what must never be read is its last entry.
+Deno.test("the address comes from the platform's own header first (§17 O26)", () => {
   assertEquals(
-    clientAddress(new Headers({ "x-forwarded-for": "10.0.0.1, 203.0.113.7" })),
+    clientAddress(
+      new Headers({
+        "sb-forwarded-for": "171.79.48.145",
+        "cf-connecting-ip": "171.79.48.145",
+        "x-forwarded-for": "171.79.48.145,171.79.48.145, 99.82.173.173",
+      }),
+    ),
+    "171.79.48.145",
+  );
+  // Cloudflare's, when Supabase's own is absent.
+  assertEquals(
+    clientAddress(new Headers({ "cf-connecting-ip": "203.0.113.7" })),
     "203.0.113.7",
   );
-  assertEquals(clientAddress(new Headers({ "x-forwarded-for": "203.0.113.7" })), "203.0.113.7");
+});
+
+// The bug this replaced: the last entry is an AWS hop that rotates between requests,
+// so every anonymous caller in the world shared a handful of buckets.
+Deno.test("the last x-forwarded-for entry is never the caller", () => {
+  const bucketed = clientAddress(
+    new Headers({ "x-forwarded-for": "171.79.48.145,171.79.48.145, 99.82.173.173" }),
+  );
+  assertEquals(bucketed, "171.79.48.145");
+  assertEquals(bucketed === "99.82.173.173", false, "the rotating hop, not the caller");
+});
+
+Deno.test("a local stack sends one entry, and it is the caller", () => {
+  assertEquals(clientAddress(new Headers({ "x-forwarded-for": "192.168.65.1" })), "192.168.65.1");
 });
 
 Deno.test("an authority is unwrapped to the address inside it", () => {
   assertEquals(
-    clientAddress(new Headers({ "x-forwarded-for": "203.0.113.7:41234" })),
+    clientAddress(new Headers({ "sb-forwarded-for": "203.0.113.7:41234" })),
     "203.0.113.7",
   );
   assertEquals(
@@ -181,7 +207,7 @@ Deno.test("an authority is unwrapped to the address inside it", () => {
   );
 });
 
-Deno.test("no header means one shared bucket, not a refusal (§7.3)", () => {
+Deno.test("no header at all means one shared bucket, not a refusal (§7.3)", () => {
   assertEquals(clientAddress(new Headers()), "unknown");
   assertEquals(clientAddress(new Headers({ "x-forwarded-for": "  " })), "unknown");
 });
