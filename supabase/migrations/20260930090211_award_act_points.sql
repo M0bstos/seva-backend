@@ -90,9 +90,15 @@ begin
   -- is the rule being enforced — "an Act can link to an Activity the author joined" —
   -- and `create_act` enforces it at the gate as well; this is the same condition at
   -- the place that does the writing.
+  --
+  -- The organiser counts, as they do at the gate: they ran the Activity, and §7.3's
+  -- join route is for everyone else. Without that an organiser's own Act reached
+  -- neither their campaign's progress nor §6.1's bonus, so a campaign built from one
+  -- organiser's Activities would have shown zero against an `acts` goal.
   select
-    case when p.user_id is not null then a.campaign_id end,
-    p.user_id is not null
+    case when a.organiser_id = new.author_id or p.user_id is not null
+      then a.campaign_id end,
+    a.organiser_id = new.author_id or p.user_id is not null
   into v_campaign_id, v_documented
   from public.activities a
   left join public.activity_participants p

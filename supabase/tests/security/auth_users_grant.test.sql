@@ -57,24 +57,38 @@ select is_empty(
 -- `O16` chose the grant over a definer helper to keep three reads "out of a definer
 -- body CI cannot inspect". One of the three moved into one anyway: §6.1's 100-point
 -- cap is awarded by a trigger, and §9.2 gives the ledger no write path at all, so
--- there is nowhere else for the award to happen. The frame runs as the function's
--- owner, which holds `auth.users` table-wide — measured: `select phone, email,
+-- there is nowhere else for the award to happen. That frame runs as the function's
+-- owner, which holds the whole `auth` schema — measured, `select phone, email,
 -- encrypted_password from auth.users` succeeds there and fails as `service_role`.
 --
--- A `service_role`-owned definer would have restored the boundary by privilege, but
--- ownership needs `create` on the schema and granting that to `service_role` opens
--- far more than it closes (measured). So this is the control instead: the only thing
--- between that body and a phone number is the body's own text, and this reads it.
--- Narrow by design — it asks about the columns §9.8 names, not about every column —
--- because a definer body may legitimately mention a word that is also a column name.
+-- **This is a text lint, not a boundary.** The privilege boundary is genuinely gone
+-- inside that frame; nothing below restores it. What this catches is an accidental
+-- `select u.phone` in a definer body, and it is worth having for that alone. What it
+-- cannot catch, each one tried: a whole-row read (`to_jsonb(u)`) then a key built by
+-- concatenation, and a column Supabase adds later that no pattern here names. A
+-- `service_role`-owned definer would have been the real boundary, but ownership needs
+-- `create` on the schema and granting that opens far more than it closes — measured.
+--
+-- Over **every** definer function in `public` rather than one by name, because the
+-- next one is the one nobody reviewed. Comments are stripped first: a body saying
+-- "never log the author's email here (§9.8)" is better code, and a check that failed
+-- on it is a check someone would weaken.
 select is_empty(
-  $$ select c.column_name from information_schema.columns c
-     where c.table_schema = 'auth' and c.table_name = 'users'
-       and c.column_name in ('phone', 'email', 'encrypted_password', 'phone_change',
-                             'email_change', 'raw_user_meta_data')
-       and pg_get_functiondef('public.award_act_points()'::regprocedure)
-             like '%' || c.column_name || '%' $$,
-  'the one definer body that reads auth.users names no column §9.8 protects'
+  $$ with definer as (
+       select p.oid::regprocedure::text as fn,
+              regexp_replace(pg_get_functiondef(p.oid), '--[^\n]*', '', 'g') as body
+       from pg_proc p
+       join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public' and p.prosecdef
+     )
+     select d.fn from definer d
+     where d.body ~ 'auth\.'
+       and (
+         d.body ~* '(phone|email|password|token|meta_data|identity_data)'
+         or d.body ~* 'to_jsonb[[:space:]]*\([[:space:]]*[a-z_]+[[:space:]]*\)'
+         or d.body ~* 'row_to_json'
+       ) $$,
+  'no definer body in public reads the auth schema for anything §9.8 protects'
 );
 
 set local role service_role;

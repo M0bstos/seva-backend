@@ -1,16 +1,21 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(34);
+select plan(35);
 
 insert into auth.users (id, created_at) values
   ('11111111-1111-1111-1111-111111111111', now() - interval '30 days'),
-  ('22222222-2222-2222-2222-222222222222', now() - interval '30 days');
+  ('22222222-2222-2222-2222-222222222222', now() - interval '30 days'),
+  -- Onboarded, and neither a participant nor an organiser of anything: the §2.1 case
+  -- that was the exploit. Not `3333…`, which this file keeps un-onboarded on purpose.
+  ('44444444-4444-4444-4444-444444444444', now() - interval '30 days');
 insert into profiles (id, display_name) values
   ('11111111-1111-1111-1111-111111111111', 'anand'),
-  ('22222222-2222-2222-2222-222222222222', 'bina');
+  ('22222222-2222-2222-2222-222222222222', 'bina'),
+  ('44444444-4444-4444-4444-444444444444', 'devi');
 insert into profile_private (user_id, date_of_birth, terms_version, privacy_version) values
   ('11111111-1111-1111-1111-111111111111', '1995-04-04', '2026-10-01', '2026-10-01'),
-  ('22222222-2222-2222-2222-222222222222', '1990-01-01', '2026-10-01', '2026-10-01');
+  ('22222222-2222-2222-2222-222222222222', '1990-01-01', '2026-10-01', '2026-10-01'),
+  ('44444444-4444-4444-4444-444444444444', '1992-02-02', '2026-10-01', '2026-10-01');
 
 insert into activities
   (id, organiser_id, title, description, category, starts_at, ends_at, location,
@@ -29,9 +34,12 @@ values
    extensions.st_setsrid(extensions.st_makepoint(73.8567, 18.5204), 4326)::extensions.geography,
    'East gate', 40, 'visible', '00000000-0000-0000-0000-0000000000f2', repeat('e', 64));
 
--- anand joined the one that has happened; bina organised both.
-insert into activity_participants (activity_id, user_id)
-values ('aaaa0000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111');
+-- anand joined both; bina organised both and joined neither. So the two §2.1
+-- conditions can be told apart: the one anand joined that has not started isolates
+-- the start-time half, and bina against a started Activity isolates the other.
+insert into activity_participants (activity_id, user_id) values
+  ('aaaa0000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111'),
+  ('aaaa0000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111');
 
 insert into media (id, owner_id, purpose, upload_path, status) values
   ('bbbb0000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111',
@@ -200,6 +208,20 @@ select is(
   'an Activity the author joined, which has started, can be documented (§2.1)'
 );
 
+-- The attack itself, at the gate: a started Activity in someone else's campaign, by
+-- an author who joined nothing. Measured before the fix — the Act was created, its
+-- ledger rows took the campaign, and campaign progress moved.
+select is(
+  create_act('44444444-4444-4444-4444-444444444444', 'Joined nothing',
+    'A story long enough to pass the twenty character minimum the table checks.',
+    'environment', '2026-09-20', 73.85, 18.52,
+    'aaaa0000-0000-0000-0000-000000000002'::uuid, '{}'::jsonb, '{}'::uuid[],
+    '00000000-0000-0000-0000-0000000000ad', repeat('6', 64), 'acts:u4', null, 10, 30
+  ) ->> 'error',
+  'FORBIDDEN',
+  'an author who joined nothing cannot document a started Activity (§2.1)'
+);
+
 select is(
   create_act('11111111-1111-1111-1111-111111111111', 'Not yet started',
     'A story long enough to pass the twenty character minimum the table checks.',
@@ -208,7 +230,7 @@ select is(
     '00000000-0000-0000-0000-0000000000ab', repeat('4', 64), 'acts:u1', null, 10, 30
   ) ->> 'error',
   'FORBIDDEN',
-  'an Activity that has not happened yet cannot be documented (§2.1)'
+  'an Activity the author joined but which has not happened cannot be documented (§2.1)'
 );
 
 -- bina organised it and never joined, which §2.1 counts: the organiser ran it.

@@ -52,18 +52,6 @@ select is_empty(
   'no role may write the ledger, which is why the trigger is security definer'
 );
 
--- The exploit this trigger had, kept closed: an author who joined nothing must not
--- reach a campaign. §2.1 — "an Act can link to an Activity the author joined".
-select is_empty(
-  $$ select e.id from impact_entries e
-     join acts a on a.id = e.act_id
-     where e.campaign_id is not null
-       and not exists (
-         select 1 from activity_participants p
-         where p.activity_id = a.activity_id and p.user_id = a.author_id
-           and p.status = 'joined') $$,
-  'no ledger row carries a campaign its author never joined the Activity for'
-);
 
 select ok(
   not has_function_privilege('anon', 'award_act_points()', 'execute')
@@ -306,6 +294,23 @@ select is(
   (select status from acts where id = 'e1000000-0000-4000-8000-0000000000f5'),
   'visible',
   'while the Act still publishes: the switch stops points, not screening'
+);
+
+-- The exploit this trigger had, kept closed. §2.1: "an Act can link to an Activity the
+-- author joined". Placed last on purpose: run before the fixtures exist it is empty
+-- whatever the trigger does, and an earlier version of this file made exactly that
+-- mistake — with the fix reverted the suite still passed.
+select is_empty(
+  $$ select e.id from impact_entries e
+     join acts a on a.id = e.act_id
+     join activities v on v.id = a.activity_id
+     where e.campaign_id is not null
+       and v.organiser_id <> a.author_id
+       and not exists (
+         select 1 from activity_participants p
+         where p.activity_id = a.activity_id and p.user_id = a.author_id
+           and p.status = 'joined') $$,
+  'no ledger row carries a campaign its author neither joined nor organised'
 );
 
 select * from finish();
