@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(12);
+select plan(18);
 
 insert into auth.users (id, created_at)
 select ('00000000-0000-0000-0000-00000000000' || n)::uuid, now() - interval '30 days'
@@ -34,6 +34,14 @@ values
    extensions.st_setsrid(extensions.st_makepoint(73.8567, 18.5204), 4326)::extensions.geography,
    'pending', '00000000-0000-0000-0000-0000000000f1', repeat('1', 64),
    now() - interval '5 minutes');
+-- Measured from `status_changed_at`, not `created_at`: §8.3's visible → pending means
+-- an edited Act's `created_at` can be days old while it has been pending for seconds.
+-- The column is owned by its trigger and is not writable even by the table owner, so
+-- ageing a clock in a test means disabling that trigger and saying so.
+alter table acts disable trigger acts_stamp_status_changed_at;
+update acts set status_changed_at = now() - interval '5 minutes'
+where id = 'dddd0000-0000-0000-0000-000000000001';
+alter table acts enable trigger acts_stamp_status_changed_at;
 set local role service_role;
 
 select is(
@@ -43,8 +51,10 @@ select is(
 
 reset role;
 delete from private.discover_cache;
-update acts set created_at = now() - interval '16 minutes'
+alter table acts disable trigger acts_stamp_status_changed_at;
+update acts set status_changed_at = now() - interval '16 minutes'
 where id = 'dddd0000-0000-0000-0000-000000000001';
+alter table acts enable trigger acts_stamp_status_changed_at;
 set local role service_role;
 
 select is(
@@ -55,6 +65,8 @@ select is(
 reset role;
 delete from private.discover_cache;
 update acts set status = 'visible' where id = 'dddd0000-0000-0000-0000-000000000001';
+update acts set created_at = now() - interval '3 days'
+where id = 'dddd0000-0000-0000-0000-000000000001';
 insert into reports
   (id, reporter_id, subject_type, act_id, reason, status, idempotency_key, request_hash,
    created_at)
@@ -129,9 +141,11 @@ reset role;
 delete from private.discover_cache;
 update reports set status = 'dismissed', resolved_at = now(),
   resolved_by = '00000000-0000-0000-0000-000000000001' where status = 'open';
-insert into media (id, owner_id, purpose, upload_path, status, created_at)
+insert into media (id, owner_id, purpose, upload_path, status, created_at,
+                   status_changed_at)
 values ('bbbb0000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001',
-        'act', 'uploads/p1/stuck.jpg', 'processing', now() - interval '16 minutes');
+        'act', 'uploads/p1/stuck.jpg', 'processing', now() - interval '16 minutes',
+        now() - interval '16 minutes');
 set local role service_role;
 
 select is(
@@ -157,5 +171,85 @@ set local role service_role;
 
 select is(health_status(), 'ok', 'and is recomputed once that entry is gone');
 
+-- The defect `status_changed_at` was added for. Measured on the local stack before
+-- the column existed: a three-day-old Act, published, then edited by its author
+-- (§8.3's visible → pending) read `degraded` at once, because the arm measured
+-- `created_at`. §12.5 points an HTTPS_STR_MATCH check at that word, so every ordinary
+-- Act edit would have paged the rota inside 90 seconds.
+reset role;
+delete from private.discover_cache;
+update acts set status = 'pending', text_checked = false
+where id = 'dddd0000-0000-0000-0000-000000000001';
+set local role service_role;
+
+select is(
+  health_status(), 'ok',
+  'an author editing a three-day-old Act is not stuck screening'
+);
+
+-- §10.4: "Held content | Reviewed within 24 hours | Any item held 20 hours".
+-- §10.3's queue is Acts, Activities and photos, so all three are counted.
+reset role;
+delete from private.discover_cache;
+update acts set status = 'held' where id = 'dddd0000-0000-0000-0000-000000000001';
+set local role service_role;
+
+select is(
+  health_status(), 'ok',
+  'content just held is waiting for a moderator, not overdue'
+);
+
+reset role;
+delete from private.discover_cache;
+alter table acts disable trigger acts_stamp_status_changed_at;
+update acts set status_changed_at = now() - interval '21 hours'
+where id = 'dddd0000-0000-0000-0000-000000000001';
+alter table acts enable trigger acts_stamp_status_changed_at;
+set local role service_role;
+
+select is(
+  health_status(), 'degraded',
+  'and past twenty hours it is §10.4''s held-content condition'
+);
+
+reset role;
+delete from private.discover_cache;
+update acts set status = 'removed' where id = 'dddd0000-0000-0000-0000-000000000001';
+update media set status = 'held' where id = 'bbbb0000-0000-0000-0000-000000000001';
+-- Backdated in a second statement: the trigger fires on any update naming `status`
+-- and would stamp now() over the value above.
+alter table media disable trigger media_stamp_status_changed_at;
+update media set status_changed_at = now() - interval '21 hours'
+where id = 'bbbb0000-0000-0000-0000-000000000001';
+alter table media enable trigger media_stamp_status_changed_at;
+set local role service_role;
+
+select is(
+  health_status(), 'degraded',
+  'a photo held twenty hours is the same condition, since §10.3 queues photos too'
+);
+
+-- §8.4: "After that they are archived and an alarm fires; nothing is silently
+-- dropped." `O35` recorded this as unmeasurable because §5.1 grants `service_role`
+-- `execute` on pgmq's functions and not `select` on its tables. That was wrong: the
+-- queues migration grants `select, insert` on all three archives for exactly this.
+reset role;
+delete from private.discover_cache;
+update media set status = 'ready' where id = 'bbbb0000-0000-0000-0000-000000000001';
+set local role service_role;
+
+select is(health_status(), 'ok', 'with every queue drained the check is clear again');
+
+reset role;
+delete from private.discover_cache;
+select pgmq.archive('moderation', (select pgmq.send('moderation', '{"kind":"act_text"}'::jsonb)));
+set local role service_role;
+
+select is(
+  health_status(), 'degraded',
+  'and one archived job is §8.4''s alarm, which nothing could raise before'
+);
+
+reset role;
 select * from finish();
 rollback;
