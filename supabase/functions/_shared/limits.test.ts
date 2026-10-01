@@ -31,6 +31,10 @@ const SPEC: Array<{ route: string; limit: string | null; window: Window }> = [
   // exempt (§12.5)
   { route: "GET /discover/health", limit: null, window: {} },
   { route: "GET /feed", limit: "feed", window: { perMinute: 60 } },
+  // Not a §7.3 route. §9.3 gives the Send SMS hook a cap of its own, and §12.2 makes
+  // this file the only place a limit is named, so it is listed and pinned here like
+  // any other. §9.3: "start it at 15,000/day".
+  { route: "Auth Send SMS hook", limit: "sms.send", window: { perDay: 15000 } },
 ];
 
 Deno.test("every rate-limited route in §7.3 is here, with the numbers the spec gives", () => {
@@ -49,7 +53,7 @@ Deno.test("every rate-limited route in §7.3 is here, with the numbers the spec 
   }
 });
 
-Deno.test("and nothing is here that §7.3 does not limit", () => {
+Deno.test("and nothing is here that no section of the spec limits", () => {
   const named = new Set(SPEC.map((row) => row.limit).filter((name) => name !== null));
   assertEquals(Object.keys(LIMITS).sort(), [...named].sort());
 });

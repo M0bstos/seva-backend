@@ -400,6 +400,7 @@ deno_version = 2
 # routes and the API tests could not run.
 [edge_runtime.secrets]
 SEVA_RATE_LIMIT_SALT = "env(SEVA_RATE_LIMIT_SALT)"
+SEVA_SEND_SMS_HOOK_SECRET = "env(SEVA_SEND_SMS_HOOK_SECRET)"
 
 # §7.3 sets verify_jwt per function: `acts`, `activities`, `uploads`, `reports`,
 # `account` and `feed` are true, `discover`, `sms-hook` and the three workers false.
@@ -433,6 +434,14 @@ enabled = true
 verify_jwt = true
 import_map = "./functions/feed/deno.json"
 
+# False because Supabase Auth, not a client, is the caller: there is no token yet — the
+# person is asking for the code that would get them one. The call is signed instead,
+# and §9.3 has the hook verify that signature in code.
+[functions.sms-hook]
+enabled = true
+verify_jwt = false
+import_map = "./functions/sms-hook/deno.json"
+
 [analytics]
 enabled = true
 port = 54327
@@ -462,6 +471,3 @@ enabled = true
 # formatted with uppercase keywords, indent 2, max width 180, trailing commas,
 # and column/key alignment. Set to "null" to emit raw, unformatted SQL.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":180,\"commaStyle\":\"trailing\"}"
-
-
-

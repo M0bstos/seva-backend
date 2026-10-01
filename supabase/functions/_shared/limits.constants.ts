@@ -29,6 +29,12 @@ export const LIMITS = {
   "discover.campaigns": { perMinute: 60 },
   "discover.campaign": { perMinute: 60 },
   "feed": { perMinute: 60 },
+  // Not a §7.3 route. §9.3 gives the Send SMS hook a daily cap of its own — "the
+  // hook's own daily cap is the real cost stop; start it at 15,000/day" — and §12.2
+  // makes this file the only place a limit is named, whatever counts against it. Its
+  // subject is the project rather than a caller, so nothing here is halved by §7.3's
+  // 72-hour rule: the hook passes no account to the limiter.
+  "sms.send": { perDay: 15000 },
 } satisfies Record<string, Window>;
 
 // §7.3 limits four of the five public routes "per person or IP" — `/discover/health`
