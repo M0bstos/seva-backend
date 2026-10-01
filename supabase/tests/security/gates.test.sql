@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(9);
+select plan(10);
 
 select is_empty(
   $$ select format('%I.%I', schemaname, tablename)
@@ -113,6 +113,43 @@ select is_empty(
                     'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN')
            end $$,
   'clients have no table, column or sequence privilege in the auth schema'
+);
+
+-- Gate 12. The one extension this project must never install, which is the opposite
+-- shape from every other gate: it asserts an absence rather than a grant.
+--
+-- Reaching an Edge Function from inside Postgres needs `pg_net`, directly or through
+-- `supabase_functions.http_request`. **Measured on the local stack, 1 October 2026,
+-- `create extension pg_net` arrives with:**
+--
+--   * `usage on schema net` granted explicitly to `anon`, `authenticated` and
+--     `service_role`;
+--   * `execute` on `net.http_get` and `net.http_post` granted explicitly to the same
+--     three;
+--   * **every privilege on `net._http_response` and `net.http_request_queue` through
+--     `PUBLIC`** — `arwdDxtm`, so insert, update, delete and select.
+--
+-- A caller holding only the publishable key could therefore make the database issue
+-- arbitrary outbound HTTP from inside the project's network, and read the body of
+-- every response the project has ever fetched. §9.1's first layer says `anon` gets
+-- no privilege at all.
+--
+-- **None of it can be revoked.** Every object is owned by `supabase_admin`, so a
+-- migration running as `postgres` gets `WARNING: no privileges could be revoked` on
+-- the schema, the functions and both tables, and nothing changes — measured. This is
+-- the pg_cron situation of gate 8, except that what it opens is arbitrary SSRF rather
+-- than a schedule, so the answer is not to install it rather than to guard the door.
+--
+-- And no other gate would see it: gates 2 and 7 name `public`, `private`, `pgmq` and
+-- `pgmq_public`, gate 8 names `cron`, and `net` is none of those. Enabling pg_net from
+-- the dashboard would leave every other gate green.
+--
+-- What this costs is in §4.1: the three workers are invoked by the ops host's cron
+-- rather than from the database. pg_cron stays for §12.2's two purges, which are SQL
+-- and need no HTTP.
+select is_empty(
+  $$ select extname from pg_extension where extname = 'pg_net' $$,
+  'pg_net is not installed, because its grants to anon cannot be revoked'
 );
 
 select * from finish();
