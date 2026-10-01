@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(32);
+select plan(34);
 
 insert into auth.users (id, created_at) values
   ('11111111-1111-1111-1111-111111111111', now() - interval '30 days'),
@@ -20,7 +20,18 @@ values
    'Lake shore cleanup', 'Bring gloves and water. We meet at the east gate at dawn.',
    'environment', '2026-11-01T03:30:00Z', '2026-11-01T06:30:00Z',
    extensions.st_setsrid(extensions.st_makepoint(73.8567, 18.5204), 4326)::extensions.geography,
-   'East gate', 40, 'visible', '00000000-0000-0000-0000-0000000000f1', repeat('f', 64));
+   'East gate', 40, 'visible', '00000000-0000-0000-0000-0000000000f1', repeat('f', 64)),
+  -- §2.1 lets an Act link to an Activity "the author joined, once that Activity has
+  -- started", so one of each is needed: this one has happened, the one above has not.
+  ('aaaa0000-0000-0000-0000-000000000002', '22222222-2222-2222-2222-222222222222',
+   'Riverbank cleanup', 'Bring gloves and water. We meet at the east gate at dawn.',
+   'environment', now() - interval '2 days', now() - interval '2 days' + interval '3 hours',
+   extensions.st_setsrid(extensions.st_makepoint(73.8567, 18.5204), 4326)::extensions.geography,
+   'East gate', 40, 'visible', '00000000-0000-0000-0000-0000000000f2', repeat('e', 64));
+
+-- anand joined the one that has happened; bina organised both.
+insert into activity_participants (activity_id, user_id)
+values ('aaaa0000-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111');
 
 insert into media (id, owner_id, purpose, upload_path, status) values
   ('bbbb0000-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111',
@@ -173,15 +184,43 @@ select is(
   'an activity the caller cannot see is missing as far as they are concerned (§7.4)'
 );
 
+-- §2.1: "An Act can link to an Activity the author joined, once that Activity has
+-- started." Neither half was enforced until this migration, and the campaign
+-- attribution on the award trigger made the first half exploitable: an Act attached
+-- to a stranger's Activity carried its campaign onto the ledger, and campaign
+-- progress is a published number.
 select is(
   create_act('11111111-1111-1111-1111-111111111111', 'Documented activity',
     'A story long enough to pass the twenty character minimum the table checks.',
     'environment', '2026-09-20', 73.85, 18.52,
-    'aaaa0000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, '{}'::uuid[],
+    'aaaa0000-0000-0000-0000-000000000002'::uuid, '{}'::jsonb, '{}'::uuid[],
     '00000000-0000-0000-0000-0000000000a7', repeat('3', 64), 'acts:u1', null, 10, 30
   ) #>> '{act,activity_id}',
-  'aaaa0000-0000-0000-0000-000000000001',
-  'a visible activity can be documented by anyone who can see it'
+  'aaaa0000-0000-0000-0000-000000000002',
+  'an Activity the author joined, which has started, can be documented (§2.1)'
+);
+
+select is(
+  create_act('11111111-1111-1111-1111-111111111111', 'Not yet started',
+    'A story long enough to pass the twenty character minimum the table checks.',
+    'environment', '2026-09-20', 73.85, 18.52,
+    'aaaa0000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, '{}'::uuid[],
+    '00000000-0000-0000-0000-0000000000ab', repeat('4', 64), 'acts:u1', null, 10, 30
+  ) ->> 'error',
+  'FORBIDDEN',
+  'an Activity that has not happened yet cannot be documented (§2.1)'
+);
+
+-- bina organised it and never joined, which §2.1 counts: the organiser ran it.
+select is(
+  create_act('22222222-2222-2222-2222-222222222222', 'Organised it myself',
+    'A story long enough to pass the twenty character minimum the table checks.',
+    'environment', '2026-09-20', 73.85, 18.52,
+    'aaaa0000-0000-0000-0000-000000000002'::uuid, '{}'::jsonb, '{}'::uuid[],
+    '00000000-0000-0000-0000-0000000000ac', repeat('5', 64), 'acts:u2', null, 10, 30
+  ) #>> '{act,activity_id}',
+  'aaaa0000-0000-0000-0000-000000000002',
+  'and the organiser of an Activity may document it without a join row (§2.1)'
 );
 
 -- §12.2, and §17.1's rule that content checks sit after the count.
