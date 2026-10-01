@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(7);
+select plan(8);
 
 -- The gates in §9.7 cover public, private, pgmq and cron. This one grant lives in
 -- auth, which no gate reaches, so its blast radius is measured here instead.
@@ -52,6 +52,29 @@ select is_empty(
      where oid = 'auth.users'::regclass
        and array_to_string(relacl, ',') like '%service_role=r*%' $$,
   'and service_role cannot pass the read on: it holds no grant option'
+);
+
+-- `O16` chose the grant over a definer helper to keep three reads "out of a definer
+-- body CI cannot inspect". One of the three moved into one anyway: §6.1's 100-point
+-- cap is awarded by a trigger, and §9.2 gives the ledger no write path at all, so
+-- there is nowhere else for the award to happen. The frame runs as the function's
+-- owner, which holds `auth.users` table-wide — measured: `select phone, email,
+-- encrypted_password from auth.users` succeeds there and fails as `service_role`.
+--
+-- A `service_role`-owned definer would have restored the boundary by privilege, but
+-- ownership needs `create` on the schema and granting that to `service_role` opens
+-- far more than it closes (measured). So this is the control instead: the only thing
+-- between that body and a phone number is the body's own text, and this reads it.
+-- Narrow by design — it asks about the columns §9.8 names, not about every column —
+-- because a definer body may legitimately mention a word that is also a column name.
+select is_empty(
+  $$ select c.column_name from information_schema.columns c
+     where c.table_schema = 'auth' and c.table_name = 'users'
+       and c.column_name in ('phone', 'email', 'encrypted_password', 'phone_change',
+                             'email_change', 'raw_user_meta_data')
+       and pg_get_functiondef('public.award_act_points()'::regprocedure)
+             like '%' || c.column_name || '%' $$,
+  'the one definer body that reads auth.users names no column §9.8 protects'
 );
 
 set local role service_role;
