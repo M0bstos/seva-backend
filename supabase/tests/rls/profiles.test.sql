@@ -24,8 +24,8 @@ select is_empty(
   $$ select a.attname from pg_attribute a
      where a.attrelid = 'public.profiles'::regclass and a.attnum > 0 and not a.attisdropped
        and has_column_privilege('service_role', 'public.profiles', a.attname, 'update')
-       and a.attname <> 'avatar_path' $$,
-  'the backend may update only avatar_path, so verification and status stay earned'
+       and a.attname not in ('avatar_path', 'text_hidden') $$,
+  'the backend may update only avatar_path and text_hidden (§17 `O14`), so verification and status stay earned'
 );
 
 select is_empty(
