@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(18);
+select plan(19);
 
 insert into auth.users (id) values
   ('11111111-1111-1111-1111-111111111111'),
@@ -118,9 +118,22 @@ reset role;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"33333333-3333-3333-3333-333333333333","role":"authenticated"}';
 
-select is_empty(
-  $$ select 1 from profiles where id = '33333333-3333-3333-3333-333333333333' $$,
-  'a suspended account cannot read its own profile either, since the spec grants read on visible rows only'
+-- §17 `O15`, decided during the build: a suspended person reads their own row, so an
+-- app can tell them they are suspended and until when. `O33` already stops them
+-- writing. This assertion used to read the other way, before `O15` was settled.
+select results_eq(
+  $$ select status::text from profiles
+     where id = '33333333-3333-3333-3333-333333333333' $$,
+  $$ values ('suspended') $$,
+  'a suspended account reads its own profile, which is how it learns it is suspended'
+);
+
+-- `O33` stops a suspended account writing; nothing in §10.2 or §7.3 stops it
+-- reading, and the assertion above would also pass if reading were broken outright.
+select isnt(
+  (select display_name from profiles where id = '11111111-1111-1111-1111-111111111111'),
+  null,
+  'and still reads an active profile, so suspension is not a read lockout'
 );
 
 reset role;
