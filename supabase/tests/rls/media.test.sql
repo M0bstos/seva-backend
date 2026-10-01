@@ -67,8 +67,8 @@ select is_empty(
      where a.attrelid = 'public.media'::regclass and a.attnum > 0 and not a.attisdropped
        and has_column_privilege('service_role', 'public.media', a.attname, 'update')
        and a.attname not in ('act_id', 'activity_id', 'position', 'public_path',
-                             'thumb_path', 'bytes', 'width', 'height', 'status', 'labels') $$,
-  'attaching and publishing never rewrite who owns a photo or where it was uploaded'
+                             'thumb_path', 'bytes', 'width', 'height', 'status') $$,
+  'attaching and publishing never rewrite who owns a photo, or write the dead labels column (§17 `O21`)'
 );
 
 select throws_ok(
