@@ -82,9 +82,8 @@ select is(
   (claim_moderation_jobs(10) -> 0) - 'msg_id',
   jsonb_build_object(
     'kind', 'photo',
-    'upload_path', 'uploads/f1000000-0000-4000-8000-000000000001/b1.jpg',
-    'purpose', 'act'),
-  'a photo job carries its upload path and purpose'
+    'upload_path', 'uploads/f1000000-0000-4000-8000-000000000001/b1.jpg'),
+  'a photo job carries its upload path, and nothing the worker does not read'
 );
 
 -- Content removed by staff has nothing left to screen, and §8.4's quotas are the
