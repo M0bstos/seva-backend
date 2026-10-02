@@ -15,9 +15,9 @@ export const BATCH_SIZE = 10;
 export const HOLD_AT_CONFIDENCE = 80;
 
 // The four §8.4 names, as Rekognition's taxonomy version 7 spells its top-level
-// categories. Matched against level-1 labels only: the API returns the top-level label
-// alongside any second- and third-level ones, and a third-level label's `ParentName` is
-// its level-2 parent rather than the category, so reading `ParentName` would miss.
+// categories. No second- or third-level label shares one of these names, so matching
+// the label's own name is exact; reading `ParentName` would miss, because a level-3
+// label's parent is its level-2 one rather than the category.
 export const HIGH_SEVERITY_CATEGORIES = [
   "Explicit",
   "Violence",

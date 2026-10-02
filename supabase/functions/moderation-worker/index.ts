@@ -57,7 +57,6 @@ type Job = {
   // the old verdict applied to the new text.
   digest?: string;
   upload_path?: string;
-  purpose?: string;
 };
 
 export const app = new Hono().basePath("/moderation-worker");
@@ -102,8 +101,11 @@ async function screenText(job: Job) {
     typeof text === "string" && text.length > 0
   );
 
-  // One call for the whole job rather than one per field: §8.4 prices "one unit" at
-  // up to 1,000 characters, and §5.2.1 keeps every screened field well inside that.
+  // One call for the whole job rather than one per field. Not because the fields are
+  // small — §5.2.1 gives a story and a description up to 2,000 characters, which is
+  // two of §8.4's text units on its own — but because §8.2 wants one verdict per piece
+  // of content, and `ApplyGuardrail`'s aggregate `action` is that verdict. Billing is
+  // by character either way.
   const answer = await guardrails.send(
     new ApplyGuardrailCommand({
       guardrailIdentifier: aws.guardrailId,
@@ -166,7 +168,14 @@ async function screenPhoto(job: Job) {
   //
   // The published object takes the same path inside `media` that it had inside
   // `uploads`, so one key identifies one photo in both buckets.
+  // Nothing is published for a held or rejected photo: §8 opens "Nothing a person
+  // writes or uploads is public until it has been screened", and `media` is a public
+  // bucket. What that leaves open is who publishes one a moderator later approves —
+  // §8.3's held → visible — which is week 4–5's `admin_set_content_status` queueing an
+  // `ops` job, because §5.4 says storage cannot be reached from SQL. Recorded in §8.1.
   if (!held) {
+    // `upsert` because §8.4 retries: a job that died after the upload and before the
+    // completion runs again, and the second upload must not fail on the first.
     const upload = await db.storage.from(MEDIA_BUCKET).upload(path, stripped, {
       contentType: PUBLISHED_CONTENT_TYPE,
       upsert: true,
@@ -194,13 +203,14 @@ async function screenPhoto(job: Job) {
   if (!held) await db.storage.from(UPLOADS_BUCKET).remove([path]);
 }
 
-// §8.4's threshold, over level-1 labels only. Rekognition returns the top-level label
-// alongside any second- and third-level ones, and a third-level label's `ParentName`
-// is its level-2 parent rather than the category — so reading `ParentName` would miss
-// "Explicit" on a photo labelled three levels deep.
+// §8.4's threshold. The four names are level-1 categories and no deeper label shares
+// one, so matching the name is what decides — and matching it *without* also requiring
+// `TaxonomyLevel === 1` is deliberate: a response that omitted the level would
+// otherwise pass every photo silently. Reading `ParentName` instead would miss
+// "Explicit" on a photo labelled three levels deep, since a level-3 label's parent is
+// its level-2 one rather than the category.
 export function holdsPhoto(labels: ModerationLabel[]): boolean {
   return labels.some((label) =>
-    label.TaxonomyLevel === 1 &&
     (HIGH_SEVERITY_CATEGORIES as readonly string[]).includes(label.Name ?? "") &&
     (label.Confidence ?? 0) >= HOLD_AT_CONFIDENCE
   );

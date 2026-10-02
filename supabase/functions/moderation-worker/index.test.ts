@@ -63,7 +63,7 @@ Deno.test("and lets a photo through below it, or outside those categories", () =
 // A level-3 label's `ParentName` is its level-2 parent, not the category, so an
 // implementation reading `ParentName` would miss "Explicit" three levels down. The
 // API returns the top-level label alongside the deeper ones, which is what is read.
-Deno.test("the level-1 label is what decides, not a deeper one's parent", () => {
+Deno.test("the category's own name is what decides, not a deeper one's parent", () => {
   const deep = [
     { Name: "Explicit", Confidence: 96, TaxonomyLevel: 1 },
     { Name: "Explicit Nudity", ParentName: "Explicit", Confidence: 95, TaxonomyLevel: 2 },
@@ -84,4 +84,14 @@ Deno.test("the level-1 label is what decides, not a deeper one's parent", () => 
 Deno.test("a confidence the API did not return is not a hold", () => {
   assertEquals(holdsPhoto([{ Name: "Explicit", TaxonomyLevel: 1 }]), false);
   assertEquals(holdsPhoto([{ Confidence: 99, TaxonomyLevel: 1 }]), false);
+});
+
+// Fail closed on a response shape §8.4 did not anticipate. An earlier version also
+// required `TaxonomyLevel === 1`, so a taxonomy that stopped sending the level would
+// have passed every photo silently — the worst way for a moderation check to break.
+Deno.test("a label with no taxonomy level still holds, rather than passing silently", () => {
+  assertEquals(holdsPhoto([{ Name: "Explicit", Confidence: 96 }]), true);
+  assertEquals(holdsPhoto([{ Name: "Hate Symbols", Confidence: 81 }]), true);
+  // And the threshold still applies, so this is not fail-closed on everything.
+  assertEquals(holdsPhoto([{ Name: "Explicit", Confidence: 60 }]), false);
 });
