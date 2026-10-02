@@ -1,6 +1,7 @@
 import { Hono } from "npm:hono@4.13.9";
 import { optionalCaller } from "../_shared/auth.ts";
 import { secretKeyClient } from "../_shared/db.ts";
+import { browserOrigins } from "../_shared/cors.ts";
 import { fail, refusal } from "../_shared/errors.ts";
 import {
   isCategory,
@@ -34,6 +35,11 @@ import {
 const db = secretKeyClient(SECRET_KEY_NAME);
 
 export const app = new Hono().basePath("/discover");
+
+// §17 `O37`: §4.1's app is "iOS · Android · web", so a browser preflights every call
+// here — §7.1 puts `apikey` on all of them. Before routing, so an OPTIONS is answered
+// rather than falling through to the 404 below.
+app.use("*", browserOrigins());
 
 // §12.5: `{"status":"ok"}` or `{"status":"degraded"}` "and nothing else — never
 // details", with the status code saying why (below). Exempt from the limiter, and

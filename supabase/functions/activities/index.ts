@@ -1,6 +1,7 @@
 import { Hono } from "npm:hono@4.13.9";
 import { requiredCaller } from "../_shared/auth.ts";
 import { secretKeyClient } from "../_shared/db.ts";
+import { browserOrigins } from "../_shared/cors.ts";
 import { fail, refusal } from "../_shared/errors.ts";
 import {
   isCategory,
@@ -39,6 +40,11 @@ const db = secretKeyClient(SECRET_KEY_NAME);
 // call is guarded so importing this file does not open a listener; the edge runtime
 // loads it as the entry module, where `import.meta.main` is true.
 export const app = new Hono().basePath("/activities");
+
+// §17 `O37`: §4.1's app is "iOS · Android · web", so a browser preflights every call
+// here — §7.1 puts `apikey` on all of them. Before routing, so an OPTIONS is answered
+// rather than falling through to the 404 below.
+app.use("*", browserOrigins());
 
 app.post("/", async (c) => {
   const userId = await requiredCaller(db, c.req.header("Authorization"));

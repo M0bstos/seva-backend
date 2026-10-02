@@ -1,6 +1,7 @@
 import { Hono } from "npm:hono@4.13.9";
 import { requiredCaller } from "../_shared/auth.ts";
 import { secretKeyClient } from "../_shared/db.ts";
+import { browserOrigins } from "../_shared/cors.ts";
 import { fail, refusal } from "../_shared/errors.ts";
 import { isCategory, isInt4, isLatitude, isLongitude, isStorableText } from "../_shared/fields.ts";
 import { limitArgs } from "../_shared/limits.ts";
@@ -18,6 +19,11 @@ import { MAX_PAGE_LIMIT, SECRET_KEY_NAME } from "./feed.constants.ts";
 const db = secretKeyClient(SECRET_KEY_NAME);
 
 export const app = new Hono().basePath("/feed");
+
+// §17 `O37`: §4.1's app is "iOS · Android · web", so a browser preflights every call
+// here — §7.1 puts `apikey` on all of them. Before routing, so an OPTIONS is answered
+// rather than falling through to the 404 below.
+app.use("*", browserOrigins());
 
 app.get("/", async (c) => {
   const userId = await requiredCaller(db, c.req.header("Authorization"));

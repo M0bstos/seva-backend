@@ -401,6 +401,9 @@ deno_version = 2
 [edge_runtime.secrets]
 SEVA_RATE_LIMIT_SALT = "env(SEVA_RATE_LIMIT_SALT)"
 SEVA_SEND_SMS_HOOK_SECRET = "env(SEVA_SEND_SMS_HOOK_SECRET)"
+# §17 `O37`: the browser origins the four public route groups answer. Unset allows
+# none, which is what a native-only client needs.
+SEVA_ALLOWED_ORIGINS = "env(SEVA_ALLOWED_ORIGINS)"
 
 # §7.3 sets verify_jwt per function: `acts`, `activities`, `uploads`, `reports`,
 # `account` and `feed` are true, `discover`, `sms-hook` and the three workers false.
