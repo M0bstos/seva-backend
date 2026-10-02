@@ -405,6 +405,14 @@ SEVA_SEND_SMS_HOOK_SECRET = "env(SEVA_SEND_SMS_HOOK_SECRET)"
 # none, which is what a native-only client needs.
 SEVA_ALLOWED_ORIGINS = "env(SEVA_ALLOWED_ORIGINS)"
 
+# The three the moderation worker reads at boot (§4.2 pins AWS to ap-south-1). It
+# fails loudly without them rather than after claiming a batch — measured, the local
+# edge runtime answers WORKER_ERROR and logs `AWS_REGION is not set`. Placeholders
+# locally: there is no AWS account, so the worker boots and serves but any send fails.
+AWS_REGION = "env(AWS_REGION)"
+SEVA_GUARDRAIL_ID = "env(SEVA_GUARDRAIL_ID)"
+SEVA_GUARDRAIL_VERSION = "env(SEVA_GUARDRAIL_VERSION)"
+
 # §7.3 sets verify_jwt per function: `acts`, `activities`, `uploads`, `reports`,
 # `account` and `feed` are true, `discover`, `sms-hook` and the three workers false.
 # A function that sets it true still calls getClaims(), because the platform check
