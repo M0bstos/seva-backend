@@ -21,12 +21,26 @@ export function secretKeyClient(keyName: string): SupabaseClient {
   // a hosted project would quietly undo it: revoking a leaked key would leave the
   // function serving on `default`, and a rotation that removed the old entry before
   // adding the new one would fail open instead of at boot.
+  // Nothing here is a browser: a persisted session would be shared between requests.
+  return createClient(url, secretKey(keyName), { auth: { persistSession: false } });
+}
+
+// The key itself, for the three workers of §7.3: they "set `verify_jwt` false and
+// check their secret key in code, since that key is not a JWT", so one of them has to
+// compare an inbound header against this value. Exported rather than re-read, because
+// the fallback rule above is the thing that must not be duplicated — a second reading
+// of the dictionary that forgot it would authorise a different key locally than the
+// client uses. A token is on §9.8's never-log list, and so is this.
+export function secretKey(keyName: string): string {
+  const url = Deno.env.get("SUPABASE_URL");
+  const keys = Deno.env.get("SUPABASE_SECRET_KEYS");
+  if (!url) throw new Error("SUPABASE_URL is not set");
+  if (!keys) throw new Error("SUPABASE_SECRET_KEYS is not set");
+
   const dictionary = JSON.parse(keys) as Record<string, string>;
   const key = dictionary[keyName] ?? (isLocal(url) ? dictionary.default : undefined);
   if (!key) throw new Error(`SUPABASE_SECRET_KEYS has no entry named ${keyName}`);
-
-  // Nothing here is a browser: a persisted session would be shared between requests.
-  return createClient(url, key, { auth: { persistSession: false } });
+  return key;
 }
 
 // A hosted project is always `https://<ref>.supabase.co`. `kong` is the hostname the

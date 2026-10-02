@@ -442,6 +442,14 @@ enabled = true
 verify_jwt = false
 import_map = "./functions/sms-hook/deno.json"
 
+# False for the same reason the three workers all set it false (§7.3): cron calls them
+# with their own secret key, which is not a JWT, so the platform cannot judge it and
+# the worker compares it in code.
+[functions.moderation-worker]
+enabled = true
+verify_jwt = false
+import_map = "./functions/moderation-worker/deno.json"
+
 [analytics]
 enabled = true
 port = 54327
