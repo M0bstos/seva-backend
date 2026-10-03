@@ -67,7 +67,7 @@ select throws_ok(
 );
 
 select throws_ok(
-  $$select count_sms_send('sms.send:919812345678', null, null, null, 15000)$$,
+  $$select count_sms_send('sms.send:919000000001', null, null, null, 15000)$$,
   'count_sms_send takes the sms.send:all bucket and a daily cap',
   'and so is this route under any other subject, which §12.2 defines only one of'
 );

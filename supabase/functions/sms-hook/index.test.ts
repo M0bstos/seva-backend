@@ -16,8 +16,14 @@ const { app, indianNumber, otpMessage, readPayload, signedBySupabase } = await i
 const { assertEquals, assertNotMatch } = await import("jsr:@std/assert@1.0.19");
 const { encodeBase64 } = await import("jsr:@std/encoding@1.0.11/base64");
 
-const OTP = "483920";
-const PHONE = "919812345678";
+// The number and the code come from `config.toml`'s `[auth.sms.test_otp]` block —
+// "Fixed codes for the seeded phone accounts. Never reach an SMS provider." Not a
+// made-up one: an arbitrary `91` plus ten digits in the mobile range is a perfectly
+// valid number that could belong to somebody, and §9.8 puts a phone number and an SMS
+// code on the never-log list.
+// A fixture in a repository is not a log, but it is the same mistake one step earlier.
+const OTP = "123456";
+const PHONE = "919000000001";
 
 function payload(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({ user: { id: "u", phone: PHONE }, sms: { otp: OTP }, ...overrides });
@@ -118,13 +124,13 @@ Deno.test("a signed call for a number outside +91 is refused (§9.3, `D16`)", as
 });
 
 Deno.test("only Indian mobile numbers are accepted, in E.164", () => {
-  assertEquals(indianNumber("919812345678"), "+919812345678");
-  assertEquals(indianNumber("+919812345678"), "+919812345678");
+  assertEquals(indianNumber(PHONE), `+${PHONE}`);
+  assertEquals(indianNumber(`+${PHONE}`), `+${PHONE}`);
   // 6 to 9 is the Indian mobile range; a landline or a short code is not somewhere a
   // sign-in code can arrive.
-  assertEquals(indianNumber("915512345678"), null);
-  assertEquals(indianNumber("9198123456789"), null);
-  assertEquals(indianNumber("91981234567"), null);
+  assertEquals(indianNumber("915000000001"), null);
+  assertEquals(indianNumber("9190000000012"), null);
+  assertEquals(indianNumber("91900000000"), null);
   assertEquals(indianNumber("14155550123"), null);
   assertEquals(indianNumber(""), null);
 });
@@ -138,12 +144,15 @@ Deno.test("a payload missing either field it reads is refused, not sent", () => 
 });
 
 Deno.test("the message sent to AWS carries the DLT pair and the registered text (§3.1)", () => {
-  const message = otpMessage("+919812345678", OTP);
-  assertEquals(message.DestinationPhoneNumber, "+919812345678");
+  const message = otpMessage(`+${PHONE}`, OTP);
+  assertEquals(message.DestinationPhoneNumber, `+${PHONE}`);
   assertEquals(message.OriginationIdentity, "SEVAIN");
   assertEquals(message.ConfigurationSetName, "seva-sms");
   assertEquals(message.MessageType, "TRANSACTIONAL");
-  assertEquals(message.MessageBody, "483920 is your SEVA verification code. Do not share it.");
+  assertEquals(
+    message.MessageBody,
+    `${OTP} is your SEVA verification code. Do not share it.`,
+  );
   assertEquals(message.DestinationCountryParameters, {
     IN_ENTITY_ID: "1234567890123456789",
     IN_TEMPLATE_ID: "9876543210987654321",
@@ -160,6 +169,6 @@ Deno.test("no refusal the hook can answer repeats the number or the code (§9.8)
   for (const answer of answers) {
     const text = await answer.text();
     assertNotMatch(text, /\d{6}/);
-    assertNotMatch(text, /14155550123|919812345678/);
+    assertNotMatch(text, new RegExp(`14155550123|${PHONE}`));
   }
 });
