@@ -56,7 +56,8 @@ select lives_ok(
 );
 
 select results_eq(
-  $$ select count(*)::int from admin_audit_log $$,
+  $$ select count(*)::int from admin_audit_log
+     where subject_id = '99999999-9999-9999-9999-999999999999' $$,
   $$ values (1) $$,
   'and the audit row is untouched, because the log has no foreign keys'
 );

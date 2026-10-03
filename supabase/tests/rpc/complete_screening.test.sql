@@ -62,7 +62,8 @@ select is(
 );
 
 select is(
-  (select count(*)::int from pgmq.q_moderation), 0,
+  (select count(*)::int from pgmq.q_moderation
+   where message ->> 'id' = 'f3000000-0000-4000-8000-0000000000a1'), 0,
   'and the job is gone from the queue, not retried'
 );
 

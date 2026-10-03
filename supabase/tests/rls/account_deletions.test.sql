@@ -77,7 +77,9 @@ select lives_ok(
 );
 
 select results_eq(
-  $$ select count(*)::int from account_deletions $$,
+  $$ select count(*)::int from account_deletions
+     where user_id in ('11111111-1111-1111-1111-111111111111',
+                       '22222222-2222-2222-2222-222222222222') $$,
   $$ values (1) $$,
   'and the deletion record outlives it, which is what proves the deletion happened'
 );

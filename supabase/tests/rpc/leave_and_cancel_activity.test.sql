@@ -122,7 +122,8 @@ select ok(
 );
 
 select is(
-  (select count(*)::int from pgmq.q_email),
+  (select count(*)::int from pgmq.q_email
+    where message ->> 'activity_id' = 'aaaa0000-0000-0000-0000-000000000001'),
   1,
   'exactly one job reached the email queue, one per joined participant'
 );
@@ -145,7 +146,8 @@ select is(
 );
 
 select is(
-  (select count(*)::int from pgmq.q_email),
+  (select count(*)::int from pgmq.q_email
+    where message ->> 'activity_id' = 'aaaa0000-0000-0000-0000-000000000001'),
   1,
   'and the queue is unchanged'
 );

@@ -36,7 +36,8 @@ set local role authenticated;
 set local request.jwt.claims = '{"sub":"11111111-1111-1111-1111-111111111111","role":"authenticated"}';
 
 select results_eq(
-  $$ select title from campaigns $$,
+  $$ select title from campaigns
+     where id::text like 'aaaaaaaa-0000-0000-0000-%' $$,
   $$ values ('Clean the lake'::text) $$,
   'a signed-in user reads active campaigns only'
 );
@@ -59,7 +60,8 @@ reset role;
 set local role service_role;
 
 select results_eq(
-  $$ select count(*)::int from campaigns $$,
+  $$ select count(*)::int from campaigns
+     where id::text like 'aaaaaaaa-0000-0000-0000-%' $$,
   $$ values (3) $$,
   'the backend sees every campaign, whatever its status'
 );

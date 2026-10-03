@@ -113,7 +113,10 @@ reset role;
 set local role service_role;
 
 select results_eq(
-  $$ select count(*)::int from impact_entries $$,
+  $$ select count(*)::int from impact_entries
+     where act_id = 'cccc0000-0000-0000-0000-000000000001'
+        or user_id in ('11111111-1111-1111-1111-111111111111',
+                       '22222222-2222-2222-2222-222222222222') $$,
   $$ values (3) $$,
   'the backend reads every ledger row, which export_account needs'
 );

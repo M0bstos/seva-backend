@@ -69,7 +69,9 @@ select lives_ok(
 reset role;
 
 select results_eq(
-  $$ select count(*)::int from blocks $$,
+  $$ select count(*)::int from blocks
+     where blocker_id in ('11111111-1111-1111-1111-111111111111',
+                          '22222222-2222-2222-2222-222222222222') $$,
   $$ values (1) $$,
   'the other block survived, so the delete policy scoped to its owner'
 );

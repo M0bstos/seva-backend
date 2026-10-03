@@ -165,7 +165,9 @@ select is_empty(
 );
 
 select results_eq(
-  $$ select count(*)::int from acts $$,
+  $$ select count(*)::int from acts
+     where author_id in ('11111111-1111-1111-1111-111111111111',
+                         '33333333-3333-3333-3333-333333333333') $$,
   $$ values (3) $$,
   'while everyone elses acts survive, including the one just created'
 );

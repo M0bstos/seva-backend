@@ -103,7 +103,8 @@ select is(
 reset role;
 
 select is(
-  (select count(*)::int from pgmq.q_moderation), 0,
+  (select count(*)::int from pgmq.q_moderation
+   where message ->> 'id' = 'f1000000-0000-4000-8000-0000000000a1'), 0,
   'and it leaves the queue rather than being retried five times'
 );
 
@@ -120,7 +121,8 @@ select is(claim_moderation_jobs(10), '[]'::jsonb, 'a sixth delivery claims nothi
 reset role;
 
 select is(
-  (select count(*)::int from pgmq.a_moderation), 1,
+  (select count(*)::int from pgmq.a_moderation
+   where message ->> 'id' = 'f1000000-0000-4000-8000-0000000000a1'), 1,
   'the job is archived, which is what §12.5''s dead-job alarm reads'
 );
 

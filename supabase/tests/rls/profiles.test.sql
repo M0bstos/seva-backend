@@ -152,10 +152,18 @@ select lives_ok(
   'the moderation worker can set avatar_path'
 );
 
+-- Scoped to this file's own fixtures. §13.1's rule — "a pgTAP assertion is scoped to
+-- the fixtures its own file inserted, never to a whole table" — and this assertion
+-- counted the table: a single row left behind by anything else running against the
+-- same stack failed it, which is how it was found.
 select results_eq(
-  $$ select count(*)::int from profiles $$,
+  $$ select count(*)::int from profiles
+     where id in ('11111111-1111-1111-1111-111111111111',
+                  '22222222-2222-2222-2222-222222222222',
+                  '33333333-3333-3333-3333-333333333333',
+                  '44444444-4444-4444-4444-444444444444') $$,
   $$ values (4) $$,
-  'the backend reads every profile, including a suspended one'
+  'the backend reads every profile it was given, including a suspended one'
 );
 
 reset role;
