@@ -5,7 +5,7 @@ export const SECRET_KEY_NAME = "moderation-worker";
 
 // §8.4 holds a Rekognition job for 60 seconds and retries five times, so a batch that
 // runs long is retried rather than lost. Ten is what fits: the metadata strip of a
-// 5 MB file costs about 0.3 ms of CPU (measured, §16 week 1's spike), so the cost is
+// 5 MB file costs about 2.8 ms of CPU (measured, §16 week 1's spike), so the cost is
 // the AWS round trips, and §8.4 caps Rekognition at 5 requests a second in Mumbai.
 export const BATCH_SIZE = 10;
 
