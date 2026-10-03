@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(18);
+select plan(21);
 
 insert into auth.users (id, created_at)
 select ('00000000-0000-0000-0000-00000000000' || n)::uuid, now() - interval '30 days'
@@ -248,6 +248,48 @@ set local role service_role;
 select is(
   health_status(), 'degraded',
   'and one archived job is §8.4''s alarm, which nothing could raise before'
+);
+
+-- The arm the archived-job one cannot cover. Measured: pgmq archives on read count,
+-- so a queue with no consumer never archives and shows nothing — and `ops` and `email`
+-- have no consumer until weeks 4-5, nor any symptom of their own. An orphaned file
+-- (§5.4) or an unsent cancellation email (§2.1) is invisible from every other arm.
+reset role;
+delete from private.discover_cache;
+select pgmq.purge_queue('moderation');
+select pgmq.purge_queue('ops');
+-- `purge_queue` empties the queue and not the archive, so the arm above would still
+-- be firing and this one would prove nothing.
+delete from pgmq.a_moderation;
+select pgmq.send('ops', '{"kind":"delete_media_files"}'::jsonb);
+set local role service_role;
+
+select is(
+  health_status(), 'ok',
+  'a job just enqueued is work in hand, not a backlog'
+);
+
+reset role;
+delete from private.discover_cache;
+update pgmq.q_ops
+set enqueued_at = now() - interval '16 minutes', vt = now() - interval '16 minutes';
+set local role service_role;
+
+select is(
+  health_status(), 'degraded',
+  'and one nobody has taken for fifteen minutes is, on a queue with no consumer yet'
+);
+
+-- A job mid-retry is hidden 60 seconds at a time and §8.4 archives it after five, so
+-- five minutes of retries must not read as a backlog.
+reset role;
+delete from private.discover_cache;
+update pgmq.q_ops set vt = now() + interval '30 seconds';
+set local role service_role;
+
+select is(
+  health_status(), 'ok',
+  'while a job being retried right now is hidden, and not counted (§8.4)'
 );
 
 reset role;
