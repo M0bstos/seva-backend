@@ -1,0 +1,27 @@
+-- §11.6: "The public `media` bucket must stop serving a removed file immediately."
+-- §17.1 recorded the gap this closes as one phase 3 surfaced rather than caused:
+-- "`media_status` has no takedown value, so an Act going `removed` leaves its photos
+-- `ready` with a live `public_path` on a public bucket".
+--
+-- **Decided during the build, 5 October 2026: the enum gains `removed`, and
+-- `public_path` is nulled with it.** Neither half is enough alone, and the two do
+-- different jobs:
+--
+--   * The **status** is what every reader and alarm keys on. `media_select` serves a
+--     photo only when it is `ready` (§5.2's "Read ready photos on visible content"), so
+--     `removed` is what stops the row being handed to a client at all, and it is what
+--     `/discover/health` and §10.3's review screen can see. A nulled `public_path` on a
+--     still-`ready` row is a photo the policy keeps serving with nothing behind it.
+--   * Nulling **`public_path`** is what stops the row *pointing* at a public object once
+--     the operations worker has moved the file to `quarantine`. A path left behind is one
+--     a later retry, an export (§7.3) or a re-publish could hand out after the move.
+--
+-- `rejected` was weighed as the alternative to a new value and is wrong: §5.3 and §8.1
+-- reserve it for step 1's bytes check — "a photo whose bytes are not a JPEG becomes
+-- `rejected`" (§17.1) — and a staff takedown is not a malformed file. Conflating them
+-- would also make §12.5's screening arms count takedowns.
+--
+-- Additive, so it is not one of §13.3's two-release destructive changes; §17.1 says so
+-- in as many words. Its own migration because a new enum value cannot be *used* in the
+-- transaction that adds it, and the function that uses it lands in the next one.
+alter type media_status add value 'removed';
