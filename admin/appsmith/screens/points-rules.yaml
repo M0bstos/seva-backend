@@ -1,0 +1,42 @@
+# §10.3's fifth screen: "points rules". §6.3: "Per-unit values and per-Act maximums live in
+# `points_rules`, so staff can change them without a code release (§10.2)."
+name: Points rules
+purpose: Change one scoring rule, which applies to new entries only.
+
+queries:
+  - name: rules
+    method: GET
+    path: /rest/v1/points_rules
+    params:
+      select: 'rule,points_per_unit,max_per_act,active'
+      order: 'rule.asc'
+    notes: >-
+      §7.2 gives `points_rules` a signed-in GET — "So the app can show scoring" — so this read needs
+      nothing new and is the one screen with no read gap.
+
+writes:
+  # §10.2: "Changes one scoring rule; applies to new entries only."
+  - name: setPointsRule
+    method: POST
+    path: /rest/v1/rpc/admin_set_points_rule
+    body:
+      p_rule: '{{selectedRow.rule}}'
+      p_points_per_unit: '{{perUnitInput.text}}'
+      p_max_per_act: '{{maxPerActInput.text}}'
+      p_active: '{{activeToggle.isSwitchedOn}}'
+      p_reason: '{{reasonInput.text}}'
+    notes: >-
+      "Applies to new entries only" needs nothing from this screen: §6.4 keeps every awarded value on
+      its own ledger row and the award trigger reads the rule at the moment it writes, so history
+      cannot move. The screen says so, because a person changing a rate will want to know.
+      **The two daily caps are not here and cannot be.** §6.3: "The two daily caps are constants in
+      the award function, not rows: they are a fraud control rather than a tuning knob, and changing
+      one is a migration." The screen shows them as read-only text (300, and 100 in the first 7 days)
+      so nobody looks for a field that does not exist.
+      **`max_per_act` binds whether or not the rule is `active`** (§17.1), and the screen says so:
+      switching a rule off stops it scoring and does **not** remove the only guard on `act_metrics`.
+      That was measured — "99,999 trees were accepted with the rule switched off" — before the
+      reading was corrected.
+      `p_rule` comes from the selected row rather than a free input: §5.2.1 fixes the key space to
+      `act_published`, `activity_documented` or a metric name, and the function refuses anything else
+      so a new rule cannot be invented here into a row nothing reads.

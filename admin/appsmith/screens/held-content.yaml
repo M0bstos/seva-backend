@@ -1,0 +1,88 @@
+# §10.3's first screen: "held content (oldest first, with screening labels)".
+#
+# §10.4 gives it a target — "Held content | Reviewed within 24 hours | Any item held 20 hours" — and
+# §12.5's `/discover/health` alarms on that 20 hours from `status_changed_at`, which §17.1 added
+# because `created_at` "is when the row was made" and §8.3's visible → pending made it useless.
+name: Held content
+purpose: >-
+  The review queue. Everything §8.3 left in `held`, oldest first, with the screening labels §8.4
+  kept for the closed beta, so a moderator can approve or remove it with a reason.
+
+queries:
+  # Three reads rather than one: §5.1 forbids a polymorphic subject, so held content lives in three
+  # tables and §10.3's queue is their union in the widget rather than in SQL.
+  - name: heldActs
+    method: GET
+    path: /rest/v1/acts
+    params:
+      select: 'id,title,story,category,occurred_on,status_changed_at,author_id,act_metrics(metric,value)'
+      status: 'eq.held'
+      order: 'status_changed_at.asc'
+      limit: '100'
+    notes: >-
+      Oldest first, which §10.3 asks for and §10.4's 20-hour clock makes the right order: the item
+      closest to its deadline is the one at the top. `limit` is 100 because §9.4 sets the Data API's
+      max rows there.
+
+  - name: heldActivities
+    method: GET
+    path: /rest/v1/activities
+    params:
+      select: 'id,title,description,category,starts_at,location_label,status_changed_at,organiser_id'
+      status: 'eq.held'
+      order: 'status_changed_at.asc'
+      limit: '100'
+
+  - name: heldPhotos
+    method: GET
+    path: /rest/v1/media
+    params:
+      select: 'id,act_id,activity_id,purpose,position,status_changed_at,owner_id'
+      status: 'eq.held'
+      order: 'status_changed_at.asc'
+      limit: '100'
+    notes: >-
+      A held photo carries no `public_path` — §8.1: "A held photo gets no published copy" — so this
+      screen shows no image for it. Reviewing the bytes needs the private `uploads` original, which
+      §8.1 keeps precisely so "a moderator cannot review a file that is gone"; a signed URL for it
+      is a step §14.4 has to add, because nothing in v1 mints one.
+
+  # §10.3: "with screening labels". §17 `O21` moved them out of `media` into `media_labels`, which
+  # no client role holds anything on — so this read is the one thing on any screen that needs a
+  # staff-only path, and it does not have one yet.
+  - name: screeningLabels
+    method: GET
+    path: /rest/v1/media_labels
+    params:
+      select: 'media_id,labels,created_at'
+      media_id: 'in.({{heldPhotos.data.map(p => p.id).join(",")}})'
+    notes: >-
+      **This read does not work yet, and the gap is recorded rather than worked around.** `O21`
+      decided the verdict is private and gave `media_labels` no client grant at all, so
+      `authenticated` cannot read it and this query answers 403. §10.3 is the only place the
+      specification shows labels, so the screen needs them — but the way to get them is a staff
+      `admin_*` read function, which §10.2's list does not contain. Listed as an open item; the
+      screen works without it, showing the photo and its status and not why it was flagged.
+
+writes:
+  # §10.2: "Approves, holds or removes an Act, Activity or photo. Removal reverses points."
+  - name: setContentStatus
+    method: POST
+    path: /rest/v1/rpc/admin_set_content_status
+    body:
+      p_act_id: '{{selectedRow.kind === "act" ? selectedRow.id : null}}'
+      p_activity_id: '{{selectedRow.kind === "activity" ? selectedRow.id : null}}'
+      p_media_id: '{{selectedRow.kind === "media" ? selectedRow.id : null}}'
+      p_status: '{{statusSelect.selectedOptionValue}}'
+      p_reason: '{{reasonInput.text}}'
+    status_options: [visible, held, removed]
+    notes: >-
+      Exactly one subject, which the function refuses otherwise (§5.1). `p_status` offers three
+      values and not §5.3's fourth: §8.3 reaches `pending` by screening and by an author's edit,
+      never by a staff decision. The reason field is required and bounded 3-500 by §5.2.1 — the
+      function answers `VALIDATION_FAILED` with `field: reason` outside that, which the screen shows
+      against the input.
+      **Approving a photo answers `processing`, not `visible`** (§17.1): the file is copied by the
+      operations worker, so the row the screen refreshes will say `processing` for a few seconds and
+      then `ready`. A photo stuck in `processing` for 15 minutes is what §12.5's arm fires on.
+      **§12.6's court-order step belongs here:** "record the order reference in the audit reason".

@@ -1,0 +1,108 @@
+# §10.3's third screen: "people (suspend, verify)". §10.1 splits what each role may do here — a
+# moderator suspends for up to 7 days and hides profile text; an admin suspends indefinitely,
+# verifies organisations and manages staff.
+name: People
+purpose: >-
+  Find a person and act on the account: suspend or reinstate (§10.2), hide or show their profile text
+  (§8.2, `O14`), set the verified badge (D7), and grant or remove a staff role.
+
+queries:
+  - name: findPeople
+    method: GET
+    path: /rest/v1/profiles
+    params:
+      select: 'id,display_name,bio,avatar_path,text_hidden,is_verified,org_name,org_type,status,suspended_until,updated_at'
+      display_name: 'ilike.*{{searchInput.text}}*'
+      limit: '50'
+    notes: >-
+      §7.2 gives `profiles` a signed-in GET, so this read needs no new grant. What it cannot show is
+      a suspended person: §O15's policy is `status = 'active' or id = auth.uid()`, so a moderator
+      searching for somebody they suspended yesterday finds nothing. **An open item**, and the same
+      shape as the two reads above — the answer is a staff `admin_*` read §10.2 does not list, not a
+      widened policy, because widening it would expose every suspended account to every client.
+      Until then a moderator works from the user id in the report or the audit log.
+
+  - name: theirActs
+    method: GET
+    path: /rest/v1/acts
+    params:
+      select: 'id,title,status,occurred_on,published_at,created_at'
+      author_id: 'eq.{{selectedPerson.id}}'
+      order: 'created_at.desc'
+      limit: '50'
+    notes: >-
+      Context for a suspension decision. `acts_select` shows a non-author only `status = 'visible'`,
+      so a moderator sees this person's published Acts and not their pending or held ones — the same
+      read gap again.
+
+writes:
+  # §10.2: "Suspends an account and queues a sign-out through the operations worker." §10.1:
+  # moderator up to 7 days, admin any.
+  - name: suspendUser
+    method: POST
+    path: /rest/v1/rpc/admin_suspend_user
+    body:
+      p_user_id: '{{selectedPerson.id}}'
+      p_until: '{{untilPicker.selectedDate}}'
+      p_reason: '{{reasonInput.text}}'
+    notes: >-
+      **`p_until` carries all three cases** (§17.1): a future timestamp suspends until then, `null`
+      suspends indefinitely and needs an admin, and a timestamp at or before now **lifts** the
+      suspension — which §10.2 lists no function for and which something has to do, or a seven-day
+      suspension would never end. Lifting an indefinite one also needs an admin, for §8.2's reason
+      about one boolean: a moderator who could undo an admin's decision would make the distinction
+      §10.1 draws meaningless.
+      A moderator who picks a date more than 7 days out gets `FORBIDDEN`, so the date picker is
+      capped at 7 days when the signed-in staff member is not an admin.
+      The sign-out is queued, not immediate: §12.4 notes an access token lasts an hour and nothing in
+      Auth reads `profiles.status`, so the operations worker revokes the sessions on its next run.
+
+  # §10.2: "Replaces a display name and hides a bio pending review." §O14's clearing path is the same
+  # function with `false`.
+  - name: hideProfileText
+    method: POST
+    path: /rest/v1/rpc/admin_hide_profile_text
+    body:
+      p_user_id: '{{selectedPerson.id}}'
+      p_hidden: '{{hiddenToggle.isSwitchedOn}}'
+      p_reason: '{{reasonInput.text}}'
+    notes: >-
+      Both directions through one function, which §O14 settled: §8.2 has the worker set the flag and
+      never clear it, "so a worker that cleared it would let an author lift a staff hide by editing
+      until something benign passed", and the clear belongs to a staff function. The toggle's current
+      state comes from `findPeople.text_hidden`.
+      §8.2 is what the flag means to a reader: "the display name shows as 'SEVA member' and the bio is
+      hidden until staff review it" — the substitution is the client's, not a write to the name.
+
+  # §10.2, admin only: "Sets the verified badge and organisation name and type." D7's own words:
+  # "Evidence required for metrics; staff set a verified flag on organisations".
+  - name: setVerified
+    method: POST
+    path: /rest/v1/rpc/admin_set_verified
+    body:
+      p_user_id: '{{selectedPerson.id}}'
+      p_is_verified: '{{verifiedToggle.isSwitchedOn}}'
+      p_org_name: '{{orgNameInput.text}}'
+      p_org_type: '{{orgTypeSelect.selectedOptionValue}}'
+      p_reason: '{{reasonInput.text}}'
+    org_type_options: [ngo, school, college, resident_association, company, government_body, other]
+    notes: >-
+      §5.2.1's check is "verified ⇒ org_name and org_type set", so the two inputs are required when
+      the toggle is on and the function answers `VALIDATION_FAILED` with `field: org_name` otherwise.
+      The options are §5.3's `org_type` exactly — a value outside it would raise on the cast rather
+      than answer a code.
+
+  # §10.2, admin only: "Grants or removes a staff role (but not their own)."
+  - name: setStaff
+    method: POST
+    path: /rest/v1/rpc/admin_set_staff
+    body:
+      p_user_id: '{{selectedPerson.id}}'
+      p_role: '{{roleSelect.selectedOptionValue}}'
+      p_reason: '{{reasonInput.text}}'
+    role_options: [moderator, admin, null]
+    notes: >-
+      A null role removes the staff row, which §5.4 calls a demotion: "Staff are demoted, never
+      deleted", and §5.2.1's `restrict` foreign key is what keeps the profile. The function refuses
+      `p_user_id = the acting admin` with `FORBIDDEN` — §10.2's parenthesis, and the reason one admin
+      cannot demote every other and hold the project alone.

@@ -1,0 +1,57 @@
+# §10.3's sixth screen: "kill switches". §12.6 reaches for four of the six by name, which makes this
+# the screen somebody opens under pressure — so it shows what each one stops, not just its name.
+name: Kill switches
+purpose: Turn one of §5.3's six switches on or off, with a reason.
+
+queries:
+  - name: flags
+    method: GET
+    path: /rest/v1/app_flags
+    params:
+      select: 'key,engaged,updated_by'
+      order: 'key.asc'
+    notes: >-
+      §7.2 gives `app_flags` a signed-in GET — "so the app can show scoring and hide disabled
+      features" — so this read needs nothing new. `updated_by` says who last moved it; **when** is in
+      the audit log, which §17.1 records as the reason §5.2.1 gives this table no `updated_at`.
+
+writes:
+  # §10.2: "Turns a kill switch on or off."
+  - name: setFlag
+    method: POST
+    path: /rest/v1/rpc/admin_set_flag
+    body:
+      p_key: '{{selectedRow.key}}'
+      p_engaged: '{{engagedToggle.isSwitchedOn}}'
+      p_reason: '{{reasonInput.text}}'
+    notes: >-
+      Admin only (§10.1). `p_key` comes from the row rather than an input, because §5.3's `app_flag`
+      is an enum and a value outside it would raise on the cast.
+
+# What each switch stops, shown beside it. Taken from the functions that read it, so the screen
+# cannot drift from the code: a moderator under pressure should not have to guess.
+switches:
+  - key: uploads
+    stops: '`POST /uploads` and `POST /uploads/:id/complete` — no new photo enters screening.'
+    runbook: '§12.6, "Harmful content spreading": turn off `uploads` and `create_acts`.'
+  - key: create_acts
+    stops: '`POST /acts`. Editing an existing Act is not stopped by this one.'
+    runbook: '§12.6, "Harmful content spreading".'
+  - key: create_activities
+    stops: '`POST /activities`.'
+  - key: joins
+    stops: '`POST /activities/:id/join`.'
+  - key: award_points
+    stops: >-
+      The award trigger writes **no row at all**, and the Act still becomes `visible` (§17.1). §12.6's
+      step is "turn off `award_points`, fix, then rebuild the affected totals from the ledger", which
+      only works if the switch stops the writing rather than zeroing it.
+    runbook: '§12.6, "Points exploit".'
+  - key: read_only
+    stops: >-
+      Every user write: Acts, Activities, joins, leaves, cancellations, uploads and onboarding.
+      **Two things it deliberately does not stop** (§17.1): staff moderation actions, because §12.6
+      engages this switch during exactly the incident §11.6's 3-hour and §10.4's 2-hour clocks run
+      through, and `POST /reports`, because the intake of a legal grievance is the other half of the
+      same duty.
+    runbook: '§12.6, "Suspected breach" and "Request flood".'

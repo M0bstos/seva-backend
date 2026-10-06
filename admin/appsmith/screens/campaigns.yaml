@@ -1,0 +1,50 @@
+# §10.3's fourth screen: "campaigns". §2.1: "Campaigns | Created by staff. Activities attach to them.
+# Progress is collective, and counts Acts and their metrics, never people".
+name: Campaigns
+purpose: Create and edit campaigns, and watch the progress §6.1's ledger triggers maintain.
+
+queries:
+  - name: campaigns
+    method: GET
+    path: /rest/v1/campaigns
+    params:
+      select: 'id,title,description,goal_metric,goal_value,progress_value,starts_on,ends_on,status,created_at'
+      order: 'created_at.desc'
+      limit: '100'
+    notes: >-
+      §O17 settled that only active campaigns are readable — "active only, everywhere" — so
+      `campaigns_select` shows `status = 'active'` and this screen cannot list a draft or an ended
+      one. **An open item of the same shape as the other three reads.** A staff screen that cannot
+      see the draft it is about to publish is awkward; the answer is an `admin_*` read rather than a
+      widened policy, because §O17's reading is about what *clients* may see.
+
+writes:
+  # §10.2: "Creates or edits a campaign."
+  - name: upsertCampaign
+    method: POST
+    path: /rest/v1/rpc/admin_upsert_campaign
+    body:
+      p_campaign_id: '{{isEditing ? selectedRow.id : null}}'
+      p_title: '{{titleInput.text}}'
+      p_description: '{{descriptionInput.text}}'
+      p_goal_metric: '{{goalMetricSelect.selectedOptionValue}}'
+      p_goal_value: '{{goalValueInput.text}}'
+      p_starts_on: '{{startsPicker.selectedDate}}'
+      p_ends_on: '{{endsPicker.selectedDate}}'
+      p_status: '{{statusSelect.selectedOptionValue}}'
+      p_reason: '{{reasonInput.text}}'
+    goal_metric_options: [acts, waste_kg, trees_planted, volunteer_hours, animals_helped, people_reached]
+    status_options: [draft, active, ended]
+    notes: >-
+      **`goal_metric` is locked once there is progress**, and the screen disables that select when
+      `progress_value <> 0` rather than letting the function refuse it. §17.1 records why it matters:
+      §6.2's reversal subtracts against the campaign's *current* goal, so a changed goal makes a staff
+      removal raise 23514 and fail — and §11.6 puts a legal clock on a removal, so "staff cannot
+      remove content" is not a small failure. The function refuses it too, with
+      `VALIDATION_FAILED` and `field: goal_metric`; the disabled select is so a moderator is not
+      offered something that will be refused.
+      `progress_value` is **not** a field. §9.2 gives campaign progress no client write path and §6.1
+      maintains it from the ledger, so a screen that could set it would make §6.4's rebuild property
+      false.
+      §2.1 and §6.1 both record that a participant-count goal was considered and dropped, which is
+      why the options are §5.3's six and not seven.

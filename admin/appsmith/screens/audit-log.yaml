@@ -1,0 +1,55 @@
+# §10.3's seventh screen: "a read-only audit log". §10: "Every staff change is written to an audit log
+# in the same transaction, whichever tool triggered it", and §5.2: "no role may update or delete".
+name: Audit log
+purpose: >-
+  The record of every action the other six screens took, and of §8.5's automatic holds. Read-only by
+  design and by grant.
+
+queries:
+  - name: auditLog
+    method: GET
+    path: /rest/v1/admin_audit_log
+    params:
+      select: 'id,created_at,actor,staff_id,action,subject_type,subject_id,reason,before,after'
+      order: 'created_at.desc'
+      limit: '100'
+    notes: >-
+      **This read does not work yet, and it is the most consequential of the four read gaps.** §5.2's
+      Access column for `admin_audit_log` is "—": no role holds anything, which is what makes "no role
+      may update or delete" true — but it also means `authenticated` cannot select, so §10.3's screen
+      has no read path. A staff `admin_*` read function would answer it, and §10.2's list does not
+      contain one. Listed as an open item for the owner, because §10 makes this screen the thing that
+      proves the audit trail cannot be bypassed and §12.6 reads it during an incident.
+
+# What a reader sees, and what they deliberately do not.
+columns:
+  - actor: >-
+      `staff` or `system`. §8.5's automatic holds are the `system` rows, and §5.2.1's check pairs
+      `staff_id` with the first — set exactly when `actor = 'staff'`.
+  - staff_id: 'Who acted. §10.3: "the audit log records who acted, not the admin tool".'
+  - action: >-
+      `set_content_status`, `resolve_report`, `hide_profile_text`, `suspend_user`, `set_verified`,
+      `upsert_campaign`, `set_points_rule`, `set_flag` or `set_staff`.
+  - subject_type: '`act`, `activity`, `media`, `profile`, `report`, `campaign`, `app_flag` or `points_rule`.'
+  - subject_id: >-
+      A uuid. For the two subjects whose own key is text or an enum — a points rule and a kill switch
+      — it is a stable digest of that key, and `before`/`after` carry the name (§17.1).
+  - reason: >-
+      What the staff member typed, 3-500 characters. §12.6's court-order step puts the order
+      reference here. **§17.1 records an open item about this field:** nothing stops a moderator
+      typing a complainant's phone number or email into a table nothing purges and §10.3 renders on
+      screen, so the screen's placeholder text says what belongs there and what does not.
+  - before_after: >-
+      The status, flag or role either side. **Never the content.** §9.8 keeps a story, a coordinate
+      and an address out of anything that is logged, and §10.3 renders this on a screen — so
+      `set_content_status` writes `{"status": …}` and nothing more, and `hide_profile_text` writes
+      the flag and not the name it hid.
+
+not_shown:
+  - >-
+    No way to edit or delete a row, and not because the screen withholds one: §5.2 gives no role any
+    privilege on this table, so an Appsmith action that tried would be refused. The screen is
+    read-only twice over.
+  - >-
+    No phone number, email address or date of birth, because no audit row carries one — which is the
+    §9.8 property the `before`/`after` shape above exists to keep.

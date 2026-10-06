@@ -1,0 +1,80 @@
+# §10.3's second screen: "reports (with time left on the 24-hour target)".
+#
+# §10.4 is where the clocks come from, and three of them are legal: a court order at 3 hours, an
+# intimate imagery complaint at 2, an unlawful-content grievance at 36. §12.5 alarms at roughly half
+# of each — 45 minutes for `intimate_imagery`, 60 for `impersonation`, 18 hours for every open
+# report (`O35`) — so a screen that shows the time left is what turns a page into an action.
+name: Reports
+purpose: >-
+  §10.4's queue. Every open report, soonest deadline first, with the time left against the target its
+  reason carries, closed with `admin_resolve_report`.
+
+queries:
+  - name: openReports
+    method: GET
+    path: /rest/v1/reports
+    params:
+      select: 'id,subject_type,act_id,activity_id,reported_user_id,reason,details,created_at,reporter_id'
+      status: 'eq.open'
+      order: 'created_at.asc'
+      limit: '100'
+    notes: >-
+      **This read does not work yet.** §5.2's Access column for `reports` is "—": no role holds
+      anything on it, by design, and §7.2 lists no `reports` resource. So §10.3's screen has no read
+      path, which is the same gap as `media_labels` on the held-content screen and wants the same
+      answer — a staff `admin_*` read function §10.2 does not list. Listed as an open item.
+
+derived:
+  # The deadline per reason, from §10.4 and §11.6. Computed in the widget rather than in SQL, because
+  # §5.3's `report_reason` cannot tell an unlawful-content grievance from any other report (`O35`)
+  # and the mapping is a program decision that may change without a migration.
+  - name: deadlineHours
+    expression: >-
+      {{ (reason) => reason === "intimate_imagery" ? 2
+                   : reason === "impersonation" ? 36
+                   : 24 }}
+    notes: >-
+      2 hours for intimate imagery (§10.4, §11.6) and 36 for impersonation (§11.6's
+      unlawful-content row). Everything else takes §10.4's internal 24-hour target, because §5.3
+      cannot tell which other reasons are unlawful content — the reading `O35` left to the program.
+  - name: timeLeft
+    expression: >-
+      {{ (row) => moment(row.created_at).add(deadlineHours(row.reason), "hours").diff(moment(), "minutes") }}
+    notes: >-
+      Negative means the deadline has passed. The row is coloured on this value, and the table is
+      sorted by `created_at` ascending so the oldest is first — within one reason that is also the
+      closest to its deadline.
+
+writes:
+  # §10.2: "Closes a report as actioned or dismissed, with a note."
+  - name: resolveReport
+    method: POST
+    path: /rest/v1/rpc/admin_resolve_report
+    body:
+      p_report_id: '{{selectedRow.id}}'
+      p_status: '{{outcomeSelect.selectedOptionValue}}'
+      p_note: '{{noteInput.text}}'
+    status_options: [actioned, dismissed]
+    notes: >-
+      One text field, not two: the note is written to `reports.resolution_note` and used as the audit
+      reason, because on this function they are the same sentence and v1 has no reader for the first.
+      Bounded 3-500. **Only an open report can be closed** — a second attempt answers
+      `VALIDATION_FAILED` with `field: status`, which is deliberate: §5.2.1 makes `resolved_by`
+      single-valued, so overwriting would lose which moderator actually acted.
+
+  # §8.5 has already held the content on an `intimate_imagery` or `impersonation` report, so the
+  # usual next step is a removal rather than a hold — §12.6: "confirm, remove, suspend, preserve the
+  # record". The same function the held-content screen uses.
+  - name: setContentStatus
+    method: POST
+    path: /rest/v1/rpc/admin_set_content_status
+    body:
+      p_act_id: '{{selectedRow.act_id}}'
+      p_activity_id: '{{selectedRow.activity_id}}'
+      p_media_id: null
+      p_status: '{{statusSelect.selectedOptionValue}}'
+      p_reason: '{{noteInput.text}}'
+    notes: >-
+      A report about a **profile** has neither id, and §8.3's statuses do not describe a person — so
+      this button is hidden for `subject_type = 'profile'` and the people screen's suspend and
+      hide-text actions are what that report leads to instead (§10.2).
