@@ -1,0 +1,33 @@
+-- §5.2 names the "Reports function" among the writers of `reports`. §8.5's intake needs one
+-- more privilege than the table's own migration gave it, found while building `submit_report`:
+-- a second report from one person on one subject cannot be a second row (§5.2.1's partial
+-- unique index), so an urgent reason arriving second has to land on the row that already
+-- exists, or no row carries it and §12.5's 45-minute arm cannot see §10.4's two-hour clock
+-- start.
+--
+-- Its own migration, after the table's, for the reason §12.2's counter cleanup is one:
+-- CLAUDE.md puts a table's grants with the table, and a function's migration carries the
+-- function. Reverting this leaves the table and every other grant on it untouched.
+--
+-- **Two columns and no more.** `status`, `resolved_by`, `resolved_at` and `resolution_note`
+-- stay staff-only, so §10.2's resolution is out of reach of a secret key: a reporter cannot
+-- close their own complaint and cannot take it off §10.4's clock. `submit_report` narrows it
+-- further than a grant can say — the row comes from `reporter_id = p_user_id ... for update`
+-- and the comparison is strictly upward, so the only move a reporter can make is their own
+-- open report up a band.
+--
+-- A column grant rather than a definer body, which is `O14`'s argument — the automatic hide
+-- stays on a path CI can inspect, where a definer body would not be, since gate 3 skips
+-- `admin\_%` and gate 4 only checks that `search_path` is pinned. It is also load-bearing
+-- twice over: measured, `select ... for update` on a table needs an update privilege on at
+-- least one column (Postgres answers `permission denied for table reports` and hints at
+-- `GRANT UPDATE`), so narrowing this to nothing would break the row lock the escalation
+-- depends on, not only the write.
+--
+-- The residual, recorded in §17.1 and raised for the owner rather than hidden here: every
+-- Edge Function key resolves to `service_role`, which bypasses RLS, so a stolen key can
+-- `PATCH` the `reason` of any report through the Data API — including downgrading an
+-- `intimate_imagery` row to `spam`, which is the one thing that blinds the arm this grant
+-- exists to feed. The alternative shape is `hold_reported_content`'s: a definer wrapper
+-- owned by the table's owner, upgrade-only and reporter-scoped, with no column grant at all.
+grant update (reason, details) on table reports to service_role;

@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(15);
+select plan(16);
 
 insert into auth.users (id) values
   ('11111111-1111-1111-1111-111111111111'),
@@ -38,9 +38,28 @@ select is_empty(
   'submit_report files a report and cannot resolve one in the same breath'
 );
 
+-- **Narrowed, not weakened.** This assertion was `not has_any_column_privilege(…,
+-- 'UPDATE')` until `submit_report` needed to escalate an open report's reason: §5.2.1's
+-- partial unique index allows one open report per reporter per subject, so an urgent reason
+-- arriving second has to land on the row that exists or be lost — and a lost
+-- `intimate_imagery` report is §10.4's two-hour clock never starting. What the old
+-- assertion was protecting is resolution, and that is still protected: the four columns
+-- §10.2 gives `admin_resolve_report` are named below and the list is exhaustive, so a
+-- future grant on any of them fails here.
+select is_empty(
+  $$ select a.attname from pg_attribute a
+     where a.attrelid = 'public.reports'::regclass and a.attnum > 0 and not a.attisdropped
+       and has_column_privilege('service_role', 'public.reports', a.attname, 'update')
+       and a.attname not in ('reason', 'details') $$,
+  'the secret key updates a report''s reason and details and nothing else (§5.2)'
+);
+
 select ok(
-  not has_any_column_privilege('service_role', 'public.reports', 'UPDATE'),
-  'resolving a report happens inside the staff function, not on the secret key'
+  not has_column_privilege('service_role', 'public.reports', 'status', 'update')
+  and not has_column_privilege('service_role', 'public.reports', 'resolved_by', 'update')
+  and not has_column_privilege('service_role', 'public.reports', 'resolved_at', 'update')
+  and not has_column_privilege('service_role', 'public.reports', 'resolution_note', 'update'),
+  'so resolving a report still happens inside the staff function (§10.2)'
 );
 
 select is_empty(
