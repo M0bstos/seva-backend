@@ -5,9 +5,11 @@
     "jsr:@std/crypto@1.1.0": "1.1.0",
     "jsr:@std/encoding@1.0.11": "1.0.11",
     "jsr:@std/internal@^1.0.12": "1.0.14",
+    "jsr:@std/yaml@1.0.9": "1.0.9",
     "npm:@aws-sdk/client-bedrock-runtime@3.1141.0": "3.1141.0",
     "npm:@aws-sdk/client-pinpoint-sms-voice-v2@3.1141.0": "3.1141.0",
     "npm:@aws-sdk/client-rekognition@3.1141.0": "3.1141.0",
+    "npm:@aws-sdk/client-sesv2@3.1141.0": "3.1141.0",
     "npm:@supabase/supabase-js@2.116.0": "2.116.0",
     "npm:hono@4.13.9": "4.13.9"
   },
@@ -26,6 +28,9 @@
     },
     "@std/internal@1.0.14": {
       "integrity": "291516b3d4c35024d6ffbc0a9df5bf4c64116e05b50012cf846710152d2ffdf7"
+    },
+    "@std/yaml@1.0.9": {
+      "integrity": "6bad3dc766dd85b4b37eabcba81b6aa4eac7a392792ae29abcfb0f90602d55bb"
     }
   },
   "npm": {
@@ -64,6 +69,20 @@
       "dependencies": [
         "@aws-sdk/core",
         "@aws-sdk/credential-provider-node",
+        "@aws-sdk/types",
+        "@smithy/core",
+        "@smithy/fetch-http-handler",
+        "@smithy/node-http-handler",
+        "@smithy/types",
+        "tslib"
+      ]
+    },
+    "@aws-sdk/client-sesv2@3.1141.0": {
+      "integrity": "sha512-y3QxG2mMn160kSjYNm8qM6kWSH5wFWR4BBm/aHl8OdppEAVj/ZqWQ/Rl59S6ED3K21pYwoX1FsCD8VoUtAIHdA==",
+      "dependencies": [
+        "@aws-sdk/core",
+        "@aws-sdk/credential-provider-node",
+        "@aws-sdk/signature-v4-multi-region",
         "@aws-sdk/types",
         "@smithy/core",
         "@smithy/fetch-http-handler",
