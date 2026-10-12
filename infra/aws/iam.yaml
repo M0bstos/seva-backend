@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# §13.3's `iam` stack: "Roles and scoped policies (§9.5)".
+#
+# §9.5's table is the contract, and the third of §3.3's four checks is what shapes every policy
+# here: "Its access can be scoped. A key that can do one thing and can be revoked alone."
+#
+# §14.3 adds the condition every one of them carries: "`AWS_REGION` is `ap-south-1` on every
+# function, and the §9.5 AWS key carries an `aws:RequestedRegion` condition — nothing in code
+# asserts the region today". §17.1 records why that matters — "Residency rests on one mutable
+# function secret that nothing asserts … One mistyped secret sends photo bytes, Indian phone
+# numbers and sign-in codes to another region with no test, no alarm and no log line." The
+# condition is the control that does not depend on a secret being right.
+#
+# **Two of §9.5's rows are IAM users rather than roles, and their access keys are created by hand.**
+# Supabase function secrets and the log drain take a key id and a secret, not a role to assume, so
+# a user is the only shape that fits. CloudFormation can create `AWS::IAM::AccessKey`, and
+# deliberately is not asked to: the secret would then sit in the stack's outputs, readable by
+# anybody who can describe the stack. §14.3's "IAM access scoped as in §9.5" is the step that
+# creates them, and §9.5's 90-day rotation is the step that replaces them.
+Description: >-
+  SEVA IAM: the GitHub OIDC deploy role, the Supabase function and worker key, and the log-drain
+  writer. Every policy is scoped to one job and pinned to ap-south-1 (spec 9.5, 3.3, 14.3).
+  Deploy in ap-south-1.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+  LogBucketArn:
+    Type: String
+    Description: LogBucketArn from the logging stack
+  GuardrailArn:
+    Type: String
+    Description: >-
+      GuardrailArn from the moderation stack. Spec 9.5 scopes the key to
+      "bedrock:ApplyGuardrail on one guardrail", so the arn is a parameter rather than a wildcard.
+  SesIdentityArn:
+    Type: String
+    Description: >-
+      SesIdentityArn from the messaging stack. Spec 9.5 scopes the key to "ses:SendEmail from the
+      SEVA domain", which is an identity-scoped resource.
+  SmsOriginationIdentityArn:
+    Type: String
+    Description: >-
+      The registered India sender ID's arn, from the messaging stack. Spec 9.5 scopes the key to
+      "sms-voice:SendTextMessage from the registered India sender ID".
+  GitHubRepository:
+    Type: String
+    Description: 'owner/name of the repository GitHub Actions deploys from (spec 13.3)'
+    AllowedPattern: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+  GitHubOidcProviderArn:
+    Type: String
+    Description: >-
+      The account's existing GitHub OIDC provider arn. Created once per account, outside this
+      stack, so two environments can share it.
+
+Resources:
+  # §9.5: "AWS key for workers and the SMS hook | Supabase function secrets |
+  # `rekognition:DetectModerationLabels`, `bedrock:ApplyGuardrail` on one guardrail,
+  # `ses:SendEmail` from the SEVA domain, `sms-voice:SendTextMessage` from the registered India
+  # sender ID | 90 days". Four actions and nothing else.
+  FunctionUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub 'seva-${Environment}-functions'
+      Tags:
+        - Key: seva:purpose
+          Value: supabase-function-secrets
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  FunctionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub 'seva-${Environment}-functions'
+      Users:
+        - !Ref FunctionUser
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # §8.4's one Rekognition call. It takes `Image.Bytes` rather than an S3 object (§8.1
+          # strips the metadata first and sends the stripped copy), so there is no bucket to scope
+          # and the resource is unavoidably `*` — which the region condition is what bounds.
+          - Sid: ScreenPhotos
+            Effect: Allow
+            Action: 'rekognition:DetectModerationLabels'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': ap-south-1
+          # §8.2's one Guardrails call, on one guardrail. The region condition is **Asia Pacific
+          # rather than `ap-south-1` alone**, which is what §11.4 licenses: "Bedrock Guardrails,
+          # another AWS region in the same geography — The Standard tier requires it", and §4.2's
+          # "The guardrail uses a cross-region profile, because the Standard tier requires one."
+          #
+          # Review read the previous unconditional allow as over-wide and the stated reason for it
+          # as an unverified behavioural claim. Half right. Checked against current AWS
+          # documentation on cross-region inference profiles rather than guessed, and the claim
+          # holds: "SCPs and IAM policies work together to control where cross-Region inference is
+          # allowed … you can update your SCPs and IAM policies to allow all required Amazon
+          # Bedrock inference actions … in **all destination Regions** included in your chosen
+          # inference profile", and "if any destination Region … is blocked in your SCPs, the
+          # request will fail even if other Regions remain allowed". So a single-region condition
+          # really would refuse the call §4.2 provides for. What was wrong was leaving it
+          # unconditional, which licensed any region on earth — the resource scope narrowed that in
+          # practice, but the condition is the control §14.3's box names.
+          #
+          # `ap-*` is the narrowest form that cannot break the profile, and it is exactly §11.4's
+          # "same geography". Two things it does not settle, both now §14.3 launch steps because
+          # they need an account: AWS says "if you have data residency requirements, call
+          # `GetInferenceProfile` from every source Region you plan to use and verify all
+          # destination Regions in the response — don't rely on the geographic prefix in an
+          # inference profile ID alone"; and a cross-region profile's destinations may be opt-in
+          # regions where "your input prompts and output results may be stored … for abuse
+          # detection purposes", which is §11.4's concern and not something IAM can bound.
+          - Sid: ScreenText
+            Effect: Allow
+            Action: 'bedrock:ApplyGuardrail'
+            Resource: !Ref GuardrailArn
+            Condition:
+              StringLike:
+                'aws:RequestedRegion': 'ap-*'
+          # §9.3: email "from a SEVA domain with SPF, DKIM and DMARC", through SES in Mumbai.
+          - Sid: SendEmail
+            Effect: Allow
+            Action: 'ses:SendEmail'
+            Resource: !Ref SesIdentityArn
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': ap-south-1
+          # D16's SMS: the sign-in hook's codes and the message worker's cancellations, both from
+          # the one registered India sender ID.
+          - Sid: SendSms
+            Effect: Allow
+            Action: 'sms-voice:SendTextMessage'
+            Resource: !Ref SmsOriginationIdentityArn
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': ap-south-1
+
+  # §9.5: "Log-archive writer | Supabase log drain settings | Writing objects to the log bucket
+  # only | 90 days". Writing only — no read, no list, no delete: §11.1's "can't be altered" is a
+  # property of the writer as much as of the bucket.
+  LogDrainUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub 'seva-${Environment}-log-drain'
+      Tags:
+        - Key: seva:purpose
+          Value: supabase-log-drain
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  LogDrainPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub 'seva-${Environment}-log-drain'
+      Users:
+        - !Ref LogDrainUser
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: WriteLogObjects
+            Effect: Allow
+            Action: 's3:PutObject'
+            Resource: !Sub '${LogBucketArn}/*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': ap-south-1
+
+  # §13.3: "Deploys run from GitHub Actions through an OIDC role, so there are no long-lived AWS
+  # keys, behind the protected production environment." The trust policy is the whole of that
+  # security property, so it is scoped to one repository and one environment — a wildcard `sub`
+  # would let any branch of any repository in the organisation assume it.
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'seva-${Environment}-deploy'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProviderArn
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+                # §13.3 step 4: "A person approves the protected production environment in
+                # GitHub." The `environment:` claim is what ties this role to that approval; a
+                # `ref:` claim would be satisfied by a branch anybody can push.
+                'token.actions.githubusercontent.com:sub':
+                  !Sub 'repo:${GitHubRepository}:environment:${Environment}'
+      Tags:
+        - Key: seva:purpose
+          Value: cloudformation-deploys
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  # Scoped to this environment's own stacks by name, so a staging deploy cannot change production.
+  # CloudFormation needs the service permissions of whatever it creates, which is why the second
+  # statement is broad — bounded by the region condition and by the stack-name condition above it.
+  DeployPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub 'seva-${Environment}-deploy'
+      Roles:
+        - !Ref DeployRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ManageOwnStacks
+            Effect: Allow
+            Action:
+              - 'cloudformation:CreateStack'
+              - 'cloudformation:UpdateStack'
+              - 'cloudformation:DescribeStacks'
+              - 'cloudformation:DescribeStackEvents'
+              - 'cloudformation:DescribeStackResources'
+              - 'cloudformation:GetTemplate'
+              - 'cloudformation:ValidateTemplate'
+              - 'cloudformation:CreateChangeSet'
+              - 'cloudformation:DescribeChangeSet'
+              - 'cloudformation:ExecuteChangeSet'
+              - 'cloudformation:DetectStackDrift'
+              - 'cloudformation:DescribeStackDriftDetectionStatus'
+            Resource: !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/seva-${Environment}-*/*'
+          - Sid: ManageSevaResources
+            Effect: Allow
+            Action:
+              - 's3:*'
+              - 'iam:*'
+              - 'ses:*'
+              - 'sms-voice:*'
+              - 'bedrock:*'
+              - 'sns:*'
+              - 'cloudwatch:*'
+              - 'budgets:*'
+              - 'route53:*'
+              - 'ec2:*'
+              - 'logs:*'
+              - 'ssm:*'
+              - 'cloudtrail:*'
+              - 'cloudformation:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                # The health-check half of §12.5 is deployed in us-east-1, where Route 53 publishes
+                # its metrics, so both regions are allowed and nothing else is.
+                'aws:RequestedRegion': [ap-south-1, us-east-1]
+
+          # **The four denies below are what bound the allow above**, and review is why they exist:
+          # a role holding `s3:*` and `iam:*` on `*` can rewrite the controls §11.1 and §12.3 rest
+          # on, and an explicit deny beats an allow in every policy evaluation. §11.1's Object Lock
+          # in COMPLIANCE mode protects log objects *already written* — it does not protect the
+          # bucket's default retention, its lifecycle, or the backup bucket, which has no lock at
+          # all. §12.3 calls PITR, the Supabase dailies and the weekly dump "the whole of SEVA's
+          # durability and recovery story", and one compromised GitHub production environment could
+          # delete the third of those.
+          #
+          # A deploy that genuinely needs to change a retention control is a deliberate act for a
+          # human with their own credentials, which is also what leaves a CloudTrail record naming a
+          # person rather than a workflow.
+          - Sid: DenyRetentionControlChanges
+            Effect: Deny
+            Action:
+              - 's3:PutBucketObjectLockConfiguration'
+              - 's3:PutLifecycleConfiguration'
+              - 's3:PutBucketVersioning'
+              - 's3:PutBucketPolicy'
+              - 's3:DeleteBucketPolicy'
+              - 's3:PutObjectRetention'
+              - 's3:PutObjectLegalHold'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::seva-${Environment}-logs-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::seva-${Environment}-logs-${AWS::AccountId}/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::seva-${Environment}-backups-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::seva-${Environment}-backups-${AWS::AccountId}/*'
+
+          # §12.3's weekly dump is the layer that survives losing the Supabase account, so nothing
+          # that deploys code may delete it. The ops host writes with `s3:PutObject` alone and has
+          # no read, so this takes nothing the backup flow needs.
+          - Sid: DenyBackupDeletion
+            Effect: Deny
+            Action:
+              - 's3:DeleteObject'
+              - 's3:DeleteObjectVersion'
+              - 's3:DeleteBucket'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::seva-${Environment}-backups-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::seva-${Environment}-backups-${AWS::AccountId}/*'
+
+          # `iam:*` is the larger half of the same finding, and `aws:RequestedRegion` does not bound
+          # it: IAM is global and resolves to `us-east-1`, which the condition above allows. So the
+          # role could mint an administrator and strip its own region conditions. It may still manage
+          # the `seva-*` names it actually creates, and nothing else.
+          - Sid: DenyIamOutsideSevaNames
+            Effect: Deny
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:DeleteRole'
+              - 'iam:PutRolePolicy'
+              - 'iam:DeleteRolePolicy'
+              - 'iam:AttachRolePolicy'
+              - 'iam:DetachRolePolicy'
+              - 'iam:CreateUser'
+              - 'iam:DeleteUser'
+              - 'iam:PutUserPolicy'
+              - 'iam:AttachUserPolicy'
+              - 'iam:CreateAccessKey'
+              - 'iam:UpdateAssumeRolePolicy'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/seva-*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:user/seva-*'
+
+          # §11.1's trail is the record everything else is reconstructed from, so a deploy may not
+          # stop or delete it. Creating and updating it stays allowed, because this stack's own
+          # `logging` template does that.
+          - Sid: DenyTrailTampering
+            Effect: Deny
+            Action:
+              - 'cloudtrail:StopLogging'
+              - 'cloudtrail:DeleteTrail'
+              - 'cloudtrail:PutEventSelectors'
+            Resource: '*'
+
+Outputs:
+  FunctionUserName:
+    Description: >-
+      Create this user's access key by hand and put it in Supabase function secrets (spec 9.5,
+      14.3). It is not created here, because the secret would land in this stack's outputs.
+    Value: !Ref FunctionUser
+  LogDrainUserName:
+    Description: >-
+      Create this user's access key by hand and put it in Supabase log drain settings (spec 9.5).
+    Value: !Ref LogDrainUser
+  DeployRoleArn:
+    Description: Assume this from GitHub Actions through OIDC (spec 13.3)
+    Value: !GetAtt DeployRole.Arn
