@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(9);
+select plan(11);
 
 insert into auth.users (id) values
   ('11111111-1111-1111-1111-111111111111'),
@@ -85,6 +85,40 @@ select is_empty(
   $$ select 1 from account_exports
      where user_id = '22222222-2222-2222-2222-222222222222' $$,
   'and its export rows cascade away with it'
+);
+
+-- §5.4: "**Storage files cannot be deleted with SQL.** Removing a `storage.objects` row leaves the
+-- file orphaned." `account_exports.user_id` cascades from `profiles`, so an erasure destroys the only
+-- row naming an export file — and the file carries a date of birth and `guardian_consent` (§11.2).
+-- Reproduced before the trigger existed: the object outlived the account for ever.
+--
+-- A row with a `file_path`, deleted the way a cascade deletes it.
+insert into account_exports (id, user_id, status, file_path, ready_at, expires_at)
+values ('eeee0000-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111',
+        'ready', '11111111-1111-1111-1111-111111111111/eeee0000-0000-0000-0000-000000000003.json',
+        now(), now() + interval '7 days');
+
+delete from profiles where id = '11111111-1111-1111-1111-111111111111';
+
+select is(
+  (select message ->> 'file_path' from pgmq.q_ops
+   where message ->> 'kind' = 'delete_export_file'
+     and message ->> 'export_id' = 'eeee0000-0000-0000-0000-000000000003'),
+  '11111111-1111-1111-1111-111111111111/eeee0000-0000-0000-0000-000000000003.json',
+  'erasing an account queues the deletion of its export file (§5.4, §11.2, O7)'
+);
+
+-- And the other half, so the trigger does not start sending jobs for nothing: Bina's export, deleted
+-- by the cascade above, never had a file written — `complete_account_export` is what sets
+-- `file_path`, and it never ran for her. Anand's `…0001` is not the row to assert this on: a test
+-- further up this file gives it a `file_path`, so a job for it is correct, and asserting otherwise
+-- failed for the right reason the first time I wrote it.
+select is(
+  (select count(*)::int from pgmq.q_ops
+   where message ->> 'kind' = 'delete_export_file'
+     and message ->> 'export_id' = 'eeee0000-0000-0000-0000-000000000002'),
+  0,
+  'and a row whose file was never written queues nothing'
 );
 
 select * from finish();
