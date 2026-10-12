@@ -596,6 +596,19 @@ assertEquals(ready.status, 200);
 assertEquals(ready.body.status, "ready");
 assert(typeof ready.body.url === "string", "§7.3 hands back a signed URL once it is ready");
 pass("export requested, built and handed back", "`O7` expires it in 7 days");
+// The export's object path, read before the erasure destroys the row that names it. This is the
+// assertion whose absence let a launch-blocking defect through: the walkthrough ran exactly this
+// sequence and checked only the rows, so every run left a full copy of someone's data — date of
+// birth and `guardian_consent` included — orphaned in the `exports` bucket for ever.
+const exportPath = await sql(`select file_path from account_exports where id='${exportId}'`);
+assert(exportPath.length > 0, "the worker records the path it wrote");
+const exportObject = () =>
+  fetch(`${API}/storage/v1/object/authenticated/exports/${exportPath}`, {
+    headers: { apikey: WORKER_KEY, Authorization: `Bearer ${WORKER_KEY}` },
+  });
+assertEquals((await exportObject()).status, 200);
+pass("the export file is in the private bucket", "and its path is recorded");
+
 const erase = await call("/account/delete", { method: "POST", token: reader.token });
 assertEquals(erase.status, 202);
 await runWorker("ops-worker");
@@ -606,6 +619,16 @@ assertEquals(
   "1",
 );
 pass("the account is gone and rule 3(1)(h)'s row is kept (§11.6)");
+
+// A second pass, because the `after delete` trigger queued the file deletion inside the erasure's
+// own transaction — the same two-pass shape `delete_media_files` has.
+await runWorker("ops-worker");
+assert(
+  (await exportObject()).status >= 400,
+  "§5.4: removing the row that names a Storage object must not leave the file behind",
+);
+assertEquals(await sql("select count(*) from pgmq.a_ops"), "0");
+pass("and the export file goes with it (§5.4, O7)", "nothing archived");
 
 heading("the second AWS boundary: screening, and what it leaves behind");
 const screening = await runWorker("moderation-worker");
