@@ -1,0 +1,274 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# §13.3's `logging` stack: "Log bucket with Object Lock and a 180-day lifecycle; backup bucket".
+#
+# §11.1 is the duty it serves: "Keep logs of all systems for 180 days, within India — Supabase log
+# drain to an S3 bucket in `ap-south-1`, with a 180-day lifecycle and Object Lock so logs can't be
+# altered. CloudTrail and ops host logs go to the same bucket." D12 names the same two properties.
+#
+# §12.3's third layer is the other bucket: "Independent weekly copy | `pg_dump` from the ops host
+# to encrypted S3 in Mumbai, kept 90 days".
+#
+# Deploy in ap-south-1 only. §11.4 lists the three flows that leave India and a log bucket is not
+# one of them, so a bucket in any other region would be a residency defect rather than a
+# configuration choice.
+Description: >-
+  SEVA log archive and backup buckets. The log bucket carries Object Lock and a 180-day
+  lifecycle for CERT-In (spec 11.1, D12); the backup bucket keeps the weekly dump 90 days
+  (spec 12.3). Deploy in ap-south-1.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+    Description: >-
+      Spec 12.7 gives staging and production separate projects, so each gets its own buckets.
+      Bucket names are global, so the account id is mixed in below.
+  BreakGlassRoleName:
+    Type: String
+    Description: >-
+      The one role allowed to place or extend an Object Lock legal hold on the log bucket, for spec
+      12.6's "Suspected breach - preserve logs" and spec 11.1's 6-hour clock. A name rather than a
+      role this stack creates: who may assume it, and under what approval, is a program decision
+      (spec 17.1), and the control here is that the exit is named and shows up in CloudTrail.
+    AllowedPattern: '^[A-Za-z0-9+=,.@_-]{1,64}$'
+
+Resources:
+  # §11.1: "with a 180-day lifecycle and Object Lock so logs can't be altered". Object Lock needs
+  # versioning on at creation and cannot be turned on afterwards — the bucket would have to be
+  # replaced — which is why both are here from the start.
+  LogBucket:
+    Type: AWS::S3::Bucket
+    # Retain, because §11.1's duty is to keep the logs: a stack deletion must not take 180 days of
+    # evidence with it, and Object Lock would refuse the object deletions anyway.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'seva-${Environment}-logs-${AWS::AccountId}'
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            # COMPLIANCE rather than GOVERNANCE: §11.1 says logs "can't be altered", and under
+            # GOVERNANCE a principal holding s3:BypassGovernanceRetention can delete them. Nobody
+            # — including the account root — can shorten a COMPLIANCE lock.
+            Mode: COMPLIANCE
+            Days: 180
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          # §11.1's 180 days, as an expiry rather than only as a lock: the lock stops a log being
+          # altered or deleted early, and this is what stops the bucket growing for ever.
+          #
+          # **The two periods do not add up**, which review corrected. On a versioned bucket
+          # `ExpirationInDays` deletes nothing — it inserts a delete marker and makes the current
+          # version noncurrent — and `NoncurrentVersionExpirationInDays` then counts from *that*
+          # moment. At 180 and 180 a log written on day 0 was permanently deleted around day 360.
+          # §11.1's duty is a 180-day floor and was met; §11.2's retention row ("logs 180 days") and
+          # §14.3's box were not. The marker is inserted at 180, the bytes go the day after, and a
+          # second rule sweeps the markers left behind — `ExpiredObjectDeleteMarker` cannot share a
+          # rule with `ExpirationInDays`.
+          #
+          # **Whether over-retention is itself a problem is a legal question (§17.1):** 180 days may
+          # be a floor with margin, or a ceiling under DPDP minimisation. This implements the
+          # narrower reading, which is the one that needs no decision to be defensible.
+          - Id: expire-after-180-days
+            Status: Enabled
+            ExpirationInDays: 180
+            NoncurrentVersionExpirationInDays: 1
+          - Id: clear-expired-delete-markers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+          # An incomplete multipart upload is not a log and is not retained by the lock.
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: seva:purpose
+          Value: cert-in-log-archive
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  # §9.4 keeps everything out that is not explicitly let in. The log drain writes with the
+  # credentials §9.5 calls the "Log-archive writer", whose policy is in the `iam` stack; this policy
+  # is the bucket's own half — TLS required, and no deletion by anybody.
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt LogBucket.Arn
+              - !Sub '${LogBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          # Belt and braces beside the COMPLIANCE lock: §11.1's "can't be altered" is the property,
+          # and a deny here fails the call before Object Lock has to.
+          #
+          # **The retention and legal-hold APIs are no longer denied to everybody**, which review
+          # corrected on two grounds. Under COMPLIANCE those two calls are how a hold is *extended*;
+          # the lock itself already refuses shortening one. Denying them to `Principal: '*'` left
+          # §12.6's "Suspected breach → preserve logs" and §11.1's 6-hour clock with no mechanism at
+          # all — an incident noticed on day 170 could not have its evidence held past the expiry
+          # above. The comment also over-claimed: a lifecycle action is performed by S3 itself rather
+          # than by a principal, so this deny never bounded expiry in the first place.
+          #
+          # They are allowed to one named role instead, so the exit is audited rather than absent.
+          - Sid: DenyObjectDeletion
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:DeleteObject'
+              - 's3:DeleteObjectVersion'
+            Resource: !Sub '${LogBucket.Arn}/*'
+          - Sid: DenyHoldChangesExceptBreakGlass
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObjectRetention'
+              - 's3:PutObjectLegalHold'
+            Resource: !Sub '${LogBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                'aws:PrincipalArn':
+                  !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${BreakGlassRoleName}'
+
+          # §11.1: "CloudTrail and ops host logs go to the same bucket." Review found trail delivery
+          # impossible — without these two statements a trail fails validation at creation — and no
+          # trail resource anywhere in the seven stacks, so §11.1's "logs of all systems" covered the
+          # Supabase drain and nothing on the AWS side. §13.3's stack table gives this stack the
+          # bucket and assigns the trail to no stack, which is how it went missing.
+          - Sid: AllowCloudTrailAclRead
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: 's3:GetBucketAcl'
+            Resource: !GetAtt LogBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+          - Sid: AllowCloudTrailDelivery
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub '${LogBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': bucket-owner-full-control
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+  # §11.1's AWS half, and §14.3's "CloudTrail on" box. One multi-region trail with management events
+  # — which is what records who changed an IAM policy, a bucket lifecycle or a Bedrock setting, the
+  # changes §11.1's 180 days exist to be able to reconstruct. Not data events: those would record
+  # every object read in the `media` bucket, which is user activity rather than system activity and
+  # would put a minor's object keys in a 180-day archive for no duty that asks for it (§9.6, §9.8).
+  Trail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: LogBucketPolicy
+    Properties:
+      TrailName: !Sub 'seva-${Environment}'
+      S3BucketName: !Ref LogBucket
+      IsLogging: true
+      # Multi-region because an action taken in another region against SEVA's account is exactly
+      # what §11.4 needs to be able to see afterwards, and `us-east-1` legitimately holds the
+      # health-check alarms (§12.5).
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      Tags:
+        - Key: seva:purpose
+          Value: cert-in-management-events
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  # §12.3: "Independent weekly copy | `pg_dump` from the ops host to encrypted S3 in Mumbai, kept
+  # 90 days | Losing access to the Supabase account or project". No Object Lock: §12.3 asks for a
+  # copy that can be restored, and the restore drill overwrites nothing here.
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'seva-${Environment}-backups-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-after-90-days
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpirationInDays: 90
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: seva:purpose
+          Value: weekly-database-dump
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  BackupBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackupBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt BackupBucket.Arn
+              - !Sub '${BackupBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+Outputs:
+  # Passed to the `iam` and `ops-host` stacks as parameters rather than imported, so neither
+  # depends on this stack's name and a stack can be replaced without the others being torn down.
+  LogBucketName:
+    Description: The CERT-In log archive, for the Supabase log drain and CloudTrail (spec 11.1)
+    Value: !Ref LogBucket
+  LogBucketArn:
+    Description: Pass to the iam stack as LogBucketArn
+    Value: !GetAtt LogBucket.Arn
+  BackupBucketName:
+    Description: The weekly pg_dump target, written by the ops host (spec 12.3)
+    Value: !Ref BackupBucket
+  BackupBucketArn:
+    Description: Pass to the ops-host stack as BackupBucketArn
+    Value: !GetAtt BackupBucket.Arn
