@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(25);
+select plan(30);
 
 insert into auth.users (id, created_at)
 values ('f3000000-0000-4000-8000-000000000001', now() - interval '30 days');
@@ -320,6 +320,77 @@ select is(
   'and a text job sent to the photo completion does the same'
 );
 
+-- **The takedown clobber, found in review on 5 October 2026.** A completion whose photo
+-- staff removed must not put it back: §11.6 requires the public bucket to stop serving a
+-- removed file immediately, and the removal has already written its snapshot and its audit
+-- row by then.
+--
+-- **What the three assertions below do and do not cover, stated plainly because the
+-- difference was measured.** They cover the *stale claim* — a worker completing a job
+-- whose photo is already `removed` when it reads the row — which the shipped function
+-- already handled through its `status = 'processing'` predicate. They do **not** cover the
+-- interleaving that was the actual defect: the row read as `processing` and committed as
+-- `removed` between the read and the update. Mutation-tested, and they passed with both
+-- new guards reverted, which is how that was found. The interleaving needs two sessions
+-- holding one transaction open against each other, and pgTAP has one — so the lock and the
+-- repeated predicate are asserted as text at the end of this file instead, which fails if
+-- either is removed.
 reset role;
+insert into media (id, owner_id, purpose, upload_path, public_path, status)
+values ('f3000000-0000-4000-8000-0000000000c1',
+        'f3000000-0000-4000-8000-000000000001', 'avatar',
+        'uploads/f3/c1.jpg', null, 'processing');
+select pg_temp.queue('photo', 'f3000000-0000-4000-8000-0000000000c1');
+set local role service_role;
+select claim_moderation_jobs(10);
+
+reset role;
+update media set status = 'removed' where id = 'f3000000-0000-4000-8000-0000000000c1';
+set local role service_role;
+
+select is(
+  complete_photo_screening(
+    (select msg_id from pgmq.q_moderation
+     where message ->> 'id' = 'f3000000-0000-4000-8000-0000000000c1'),
+    'ready', null, 1000, 10, 10
+  ) ->> 'error',
+  'NOT_FOUND',
+  'a verdict about a photo staff have removed is dropped, not applied (§11.6)'
+);
+
+reset role;
+select ok(
+  (select status = 'removed' and public_path is null
+   from media where id = 'f3000000-0000-4000-8000-0000000000c1'),
+  'so the takedown stands and no public path is restored (§11.6)'
+);
+
+-- Scoped to this fixture's own key: an earlier assertion in this file publishes a
+-- different avatar for the same owner, so the question is whether *this* removed photo
+-- was re-pointed at, not whether the column is empty.
+select ok(
+  (select avatar_path is distinct from 'uploads/f3/c1.jpg' from profiles
+   where id = 'f3000000-0000-4000-8000-000000000001'),
+  'and a removed avatar is not re-pointed at the public bucket (§8.1, §9.2)'
+);
+
+-- The two guards the interleaving turns on, asserted over the function's own text because
+-- no single-session test can observe them. A text assertion is weak and this file says so;
+-- it is here because the alternative is no coverage at all for a defect that put a removed
+-- photo back on a public bucket. The same pattern as `auth_users_grant.test.sql`'s lint.
+select ok(
+  (select pg_get_functiondef(
+            'complete_photo_screening(bigint,media_status,jsonb,int,int,int)'::regprocedure
+          ) ~ 'where id = v_id and status = ''processing''\s*\n\s*for update'),
+  'the claim read locks the row, so a takedown committing beside it is seen (§11.6)'
+);
+
+select ok(
+  (select pg_get_functiondef(
+            'complete_photo_screening(bigint,media_status,jsonb,int,int,int)'::regprocedure
+          ) ~ 'where id = v_id and status = ''processing'';'),
+  'and the update repeats the predicate, so the write cannot outlive it (§17.1)'
+);
+
 select * from finish();
 rollback;
