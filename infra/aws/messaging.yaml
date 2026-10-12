@@ -1,0 +1,236 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# §13.3's `messaging` stack: "SES identity; SMS configuration set and protect configuration".
+#
+# D11 and D16 are the decisions: "Amazon SES in Mumbai for both sign-in and app emails", and "SMS
+# codes through Supabase Auth's SMS hook and AWS End User Messaging in Mumbai, on a DLT-registered
+# local route. Indian (+91) numbers only."
+#
+# **What this stack cannot create, and §13.3 says so: "Still done by hand: SES production access,
+# the Rekognition quota increase, DLT and India sender ID registration, and Supabase dashboard
+# settings."** A sender ID is applied for and approved — §14.2's "India sender ID approved in AWS
+# End User Messaging SMS (Mumbai)" — so its arn is an output of that process and an input to the
+# `iam` stack, not a resource here. The same is true of SES production access: the identity is
+# created here and the sandbox exit is a support request (§14.2).
+Description: >-
+  SEVA messaging: the SES domain identity with DKIM, and the End User Messaging configuration set
+  and protect configuration that keep SMS to India only (spec 9.3, D11, D16). Deploy in
+  ap-south-1.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+  SendingDomain:
+    Type: String
+    Description: >-
+      The SEVA domain sign-in and app email go out from (spec 9.3). SPF, DKIM and DMARC must pass
+      for it before launch (spec 14.2); the DKIM records this stack generates are what that needs.
+    AllowedPattern: '^[a-z0-9.-]+\.[a-z]{2,}$'
+
+Resources:
+  # D11: SES in Mumbai for both sign-in email (§9.3's custom SMTP) and the app email the message
+  # worker sends. One identity serves both, which is why §9.5's key is scoped to it.
+  EmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref SendingDomain
+      DkimAttributes:
+        SigningEnabled: true
+      DkimSigningAttributes:
+        # Easy DKIM with 2048-bit keys: §14.2 requires DKIM to pass, and the three CNAMEs this
+        # produces are published in DNS by hand.
+        NextSigningKeyLength: RSA_2048_BIT
+      # §9.3 asks for DMARC to pass, which needs the From domain to align with the signing domain.
+      MailFromAttributes:
+        MailFromDomain: !Sub 'mail.${SendingDomain}'
+        BehaviorOnMxFailure: REJECT_MESSAGE
+      FeedbackAttributes:
+        EmailForwardingEnabled: false
+      # **The configuration set is attached here**, which review found missing: without it the
+      # `TlsPolicy: REQUIRE` below, the reputation metrics and the suppression options were declared
+      # and unreached on the one path §9.3 cares about. Supabase's custom SMTP settings cannot add
+      # an `X-SES-CONFIGURATION-SET` header, so attaching it to the identity is the only way the
+      # policy applies to sign-in mail.
+      ConfigurationSetAttributes:
+        ConfigurationSetName: !Ref EmailConfigurationSet
+
+  EmailConfigurationSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: !Sub 'seva-${Environment}-email'
+      DeliveryOptions:
+        # §9.3 requires TLS for the sending domain's mail; REQUIRE fails a delivery rather than
+        # falling back to plaintext.
+        TlsPolicy: REQUIRE
+      ReputationOptions:
+        ReputationMetricsEnabled: true
+      SendingOptions:
+        SendingEnabled: true
+      SuppressionOptions:
+        SuppressedReasons:
+          - BOUNCE
+          - COMPLAINT
+
+  # §12.5's SMS row alarms on "send errors above 5%", and a configuration set is what gives End
+  # User Messaging somewhere to publish those events.
+  SmsConfigurationSet:
+    Type: AWS::SMSVOICE::ConfigurationSet
+    Properties:
+      ConfigurationSetName: !Sub 'seva-${Environment}-sms'
+      # §12.5's "SMS volume" row is measured from the hook's own log line (§17.1: the count travels
+      # out in the hook's log because §9.4 leaves the counter unreachable). What this adds is the
+      # delivery side — a failure AWS sees and the hook does not.
+      # **To CloudWatch Logs in-region, not to the alarm topic**, which review corrected and which
+      # is a §9.8 fix rather than a tidy-up: a delivery event record carries the destination phone
+      # number, and the alarm topic has the on-call email and SMS subscribed — so every failed
+      # sign-in code would have put a user's phone number in an inbox, and in whatever backs that
+      # inbox up. §5.4 keeps phone numbers in Supabase Auth with `private.retained_registrations`
+      # as the single documented exception, and §9.8 puts them on the never-log list.
+      #
+      # It was also the wrong shape for §12.5, which asks for "send errors above 5%": per-event
+      # fan-out pages on the first failure, where `SmsErrorRateAlarm` in the monitoring stack
+      # already computes that ratio. The signal is legitimate — a failure AWS sees and the hook does
+      # not — so what changed is the sink.
+      EventDestinations:
+        - EventDestinationName: delivery-failures
+          Enabled: true
+          MatchingEventTypes:
+            - TEXT_DELIVERY_FAILED
+            - TEXT_BLOCKED
+            - TEXT_CARRIER_BLOCKED
+            - TEXT_SPAM
+          CloudWatchLogsDestination:
+            IamRoleArn: !GetAtt SmsEventLogRole.Arn
+            LogGroupArn: !GetAtt SmsEventLogGroup.Arn
+      Tags:
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  # Where those events go instead. In `ap-south-1` with the rest of the stack (§11.4), and with a
+  # retention matching §11.1's 180 days for everything else SEVA logs — these records carry a phone
+  # number, so they are subject to the same clock rather than to CloudWatch's default of for ever.
+  SmsEventLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/seva/${Environment}/sms-delivery-events'
+      RetentionInDays: 180
+      Tags:
+        - Key: seva:purpose
+          Value: sms-delivery-events
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  SmsEventLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'seva-${Environment}-sms-events'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sms-voice.amazonaws.com
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      Policies:
+        - PolicyName: write-sms-events
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub '${SmsEventLogGroup.Arn}:*'
+      Tags:
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  # §9.3's last line: "An AWS protect configuration also blocks every destination country except
+  # India." D16 is the reason — "Indian (+91) numbers only".
+  #
+  # **What this resource can and cannot declare, because it matters for §14.3's box.** A protect
+  # configuration's `CountryRuleSet` is a per-country ALLOW/BLOCK map with **no default-deny**: a
+  # country absent from the map is allowed. So "allows India only" is not expressible as one entry,
+  # and the declarative form of it would be an explicit BLOCK for every other ISO-3166 country — a
+  # list of roughly 240 codes that cannot be verified offline against the set the service accepts,
+  # and a wrong or missing code would read as a configured control while leaving a country open.
+  # Rather than write a list this build cannot check, India is declared ALLOW here and the blocking
+  # of the rest stays a §14.3 step with the CLI command in this stack's outputs.
+  #
+  # Two controls do not depend on that step, which is why the gap is bounded rather than open: the
+  # `iam` stack scopes `sms-voice:SendTextMessage` to the one **registered India sender ID**, which
+  # an Indian carrier only accepts for Indian destinations, and the hook refuses any number outside
+  # §17.1's `INDIA_PHONE_PATTERN` before it calls AWS at all.
+  SmsProtectConfiguration:
+    Type: AWS::SMSVOICE::ProtectConfiguration
+    Properties:
+      # Deleting this must not quietly reopen every country, so the resource is protected against
+      # an accidental stack change as well as against a mistaken rule.
+      DeletionProtectionEnabled: true
+      # All three channels are required by the schema. SEVA sends text only (D16), so voice and
+      # multimedia are declared for India alone as well — what is not configured here is what the
+      # §14.3 step below closes.
+      CountryRuleSet:
+        SMS:
+          - CountryCode: IN
+            ProtectStatus: ALLOW
+        VOICE:
+          - CountryCode: IN
+            ProtectStatus: ALLOW
+        MMS:
+          - CountryCode: IN
+            ProtectStatus: ALLOW
+      Tags:
+        - Key: seva:purpose
+          Value: india-only-sms
+        - Key: seva:environment
+          Value: !Ref Environment
+
+Outputs:
+  SmsEventLogGroupName:
+    Description: >-
+      Where End User Messaging writes delivery failures (spec 12.5, 9.8). A phone number is in every
+      record, so this group is in ap-south-1 and kept 180 days like the rest of spec 11.1's logs. The
+      5% error-rate alarm reads the scanner's metrics, not this group.
+    Value: !Ref SmsEventLogGroup
+
+  SesIdentityArn:
+    Description: Pass to the iam stack as SesIdentityArn (spec 9.5 scopes ses:SendEmail to it)
+    Value: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SendingDomain}'
+  EmailConfigurationSetName:
+    Description: Set as the SES configuration set on Supabase custom SMTP (spec 9.3)
+    Value: !Ref EmailConfigurationSet
+  SmsConfigurationSetName:
+    Description: >-
+      Put in the SEVA_SMS_CONFIGURATION_SET function secret, which the sign-in hook and the
+      message worker both read at boot (spec 9.5).
+    Value: !Ref SmsConfigurationSet
+  SmsProtectConfigurationId:
+    Description: >-
+      Associate with the configuration set after the sender ID is approved (spec 14.2, by hand).
+    Value: !Ref SmsProtectConfiguration
+  SmsProtectConfigurationArn:
+    Description: Pass where a protect configuration arn is needed
+    Value: !GetAtt SmsProtectConfiguration.Arn
+  ManualStepsRemaining:
+    Description: >-
+      Spec 13.3 and 14.2, done by hand after this stack: SES production access (sandbox exit),
+      DKIM and DMARC DNS records, DLT principal-entity and template registration (spec 17 O4),
+      the India sender ID approval whose arn the iam stack needs, blocking every non-India
+      destination in the protect configuration above, and the monthly SMS spend limit.
+    Value: >-
+      ses-production-access, dkim-dns, dmarc-dns, dlt-registration, sender-id-approval,
+      protect-configuration-country-blocks, sms-spend-limit
+  SmsSpendLimitCommand:
+    Description: >-
+      Spec 14.3's "monthly SMS spend limit set" is an account setting rather than a CloudFormation
+      resource, so it is applied with the CLI. Spec 15 budgets 120-160 USD a month at launch scale
+      and calls routes without DLT registration "roughly 20x the local price", so this is a hard
+      stop rather than an alarm.
+    Value: !Sub >-
+      aws pinpoint-sms-voice-v2 set-text-message-spend-limit-override
+      --spend-limit 200 --region ${AWS::Region}
