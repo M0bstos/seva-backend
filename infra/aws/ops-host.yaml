@@ -1,0 +1,356 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# §13.3's `ops-host` stack: "EC2 instance, fixed IP, security group, SSM role".
+#
+# §13.3 describes it: "The ops host is one EC2 instance in Mumbai with a fixed IP. It runs Appsmith,
+# the deploy runner and the weekly backup. It's managed through AWS Systems Manager and defined in
+# `infra/aws`." §1.1 counts it as the one server SEVA patches.
+#
+# §4.1 gives it a fourth job this phase added: "Ops-host cron → Workers | Moderation, email and SMS,
+# cleanup | A named secret key per worker, held in SSM Parameter Store; pinned to `ap-south-1` with
+# `forceFunctionRegion`. **Not** pg_cron" — because gate 12 forbids `pg_net`, so nothing reaches an
+# Edge Function from inside Postgres. §17.1 records the cost: "the schedule is host configuration
+# rather than a migration, so CI cannot see it — it becomes a §14.4 launch step and a §12.6 runbook
+# entry — and a worker stops running while the ops host is down".
+#
+# §9.4's hardening is the rest: "Ops host: reached through AWS Systems Manager rather than SSH, with
+# automatic security patches, an encrypted disk and IMDSv2. Its inbound rules allow only staff IP
+# ranges, and only to Appsmith over HTTPS." And §9.4's network restrictions make this instance's
+# fixed IP the only address the database accepts.
+Description: >-
+  SEVA ops host: one EC2 instance in Mumbai with a fixed IP, reached through SSM rather than SSH,
+  running Appsmith, the deploy runner, the weekly backup and the cron that calls the three workers
+  (spec 13.3, 9.4, 4.1). Deploy in ap-south-1.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC the instance sits in. The account default VPC is acceptable for one host.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A public subnet in ap-south-1. Public because the staff reach Appsmith over HTTPS and the
+      deploy runner reaches GitHub and Supabase outbound; the security group is what bounds it.
+  StaffCidr:
+    Type: String
+    Description: >-
+      Spec 9.4: "Its inbound rules allow only staff IP ranges, and only to Appsmith over HTTPS."
+      One CIDR; add more rules for more ranges rather than widening this one.
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$'
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: >-
+      Appsmith Community Edition plus a deploy runner and a weekly pg_dump. Spec 15 budgets 40-60
+      USD a month for this host.
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: >-
+      Resolved from the SSM public parameter, so the template never pins an AMI id that would age
+      into an unpatched image. That is launch-time only — spec 9.4's "automatic security patches"
+      is the Patch Manager window in this stack, which review found had been credited to this
+      parameter.
+  LogBucketArn:
+    Type: String
+    Description: >-
+      LogBucketArn from the logging stack. Spec 11.1: "CloudTrail and ops host logs go to the same
+      bucket."
+  BackupBucketArn:
+    Type: String
+    Description: BackupBucketArn from the logging stack, for spec 12.3's weekly pg_dump.
+
+Resources:
+  # §9.4: "reached through AWS Systems Manager rather than SSH". The managed policy is what makes
+  # Session Manager work; no key pair is attached to the instance below, so there is no SSH path to
+  # leave open or to rotate.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'seva-${Environment}-ops-host'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Tags:
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  InstancePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub 'seva-${Environment}-ops-host'
+      Roles:
+        - !Ref InstanceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # §12.3: "`pg_dump` from the ops host to encrypted S3 in Mumbai, kept 90 days". Write
+          # only — the restore drill reads with a human's own credentials, so a compromised host
+          # cannot read back the dumps it wrote.
+          - Sid: WriteWeeklyBackup
+            Effect: Allow
+            Action: 's3:PutObject'
+            Resource: !Sub '${BackupBucketArn}/*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': ap-south-1
+          # §11.1: "CloudTrail and ops host logs go to the same bucket."
+          - Sid: WriteOwnLogs
+            Effect: Allow
+            Action: 's3:PutObject'
+            Resource: !Sub '${LogBucketArn}/ops-host/*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': ap-south-1
+          # §9.5: "Database password | SSM Parameter Store, read by the ops host at job time", and
+          # §4.1 adds the three worker keys. Scoped to this environment's prefix, so a staging host
+          # cannot read production's secrets.
+          - Sid: ReadOwnSecrets
+            Effect: Allow
+            Action:
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+            Resource:
+              !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/seva/${Environment}/*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': ap-south-1
+          - Sid: DecryptOwnSecrets
+            Effect: Allow
+            Action: 'kms:Decrypt'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'ssm.${AWS::Region}.amazonaws.com'
+
+  # §9.4: "automatic security patches". Review found this credited to `AmiId`, which gives a patched
+  # image at *launch* and nothing afterwards — and §1.1 counts this as the one server SEVA patches,
+  # the host holding the only IP the database accepts and running the admin tool. Patch Manager
+  # scans and installs on a weekly window; `AWS-RunPatchBaseline` with `Install` is what applies
+  # them, and the default Amazon Linux 2023 baseline is what defines "security".
+  PatchWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties:
+      Name: !Sub 'seva-${Environment}-patching'
+      Description: Weekly security patching for the ops host (spec 9.4)
+      # 19:30 UTC Sunday is 01:00 Monday in Asia/Kolkata — §5.1's timezone, and the quietest hour
+      # §12.3 also asks the weekly backup to avoid.
+      Schedule: 'cron(30 19 ? * SUN *)'
+      ScheduleTimezone: Etc/UTC
+      Duration: 2
+      Cutoff: 1
+      AllowUnassociatedTargets: false
+      Tags:
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  PatchWindowTarget:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties:
+      WindowId: !Ref PatchWindow
+      ResourceType: INSTANCE
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref OpsHost
+      Name: ops-host
+
+  PatchWindowTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      WindowId: !Ref PatchWindow
+      TaskType: RUN_COMMAND
+      TaskArn: AWS-RunPatchBaseline
+      Priority: 1
+      MaxConcurrency: '1'
+      MaxErrors: '1'
+      ServiceRoleArn: !GetAtt PatchRole.Arn
+      Targets:
+        - Key: WindowTargetIds
+          Values:
+            - !Ref PatchWindowTarget
+      TaskInvocationParameters:
+        MaintenanceWindowRunCommandParameters:
+          Parameters:
+            Operation:
+              - Install
+          # The run's own output, which §11.1 wants in the log bucket with everything else — but
+          # S3 output needs the instance role's write, so it goes to the ops-host prefix the
+          # instance policy already allows.
+          TimeoutSeconds: 3600
+
+  PatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'seva-${Environment}-ops-host-patching'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMMaintenanceWindowRole'
+      Tags:
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  # §12.6's "Check the ops host first" entry, automated as far as it can be. §4.1 moved all three
+  # worker crons here, so a dead host stops screening and moderation together while §11.6's clocks
+  # keep running — and a system status check failing is the case a recover action fixes without
+  # anybody being woken.
+  HostRecoveryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'seva-${Environment}-ops-host-system-check'
+      AlarmDescription: >-
+        The ops host failed its system status check. Recovering it automatically, because spec 4.1
+        puts all three worker crons on this host and spec 11.6's clocks do not pause (spec 12.6).
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_System
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OpsHost
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      TreatMissingData: missing
+      AlarmActions:
+        - !Sub 'arn:${AWS::Partition}:automate:${AWS::Region}:ec2:recover'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub 'seva-${Environment}-ops-host'
+      Roles:
+        - !Ref InstanceRole
+
+  # §9.4: "Its inbound rules allow only staff IP ranges, and only to Appsmith over HTTPS." No port
+  # 22: §9.4 replaces SSH with Session Manager, which needs no inbound rule at all.
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Staff to Appsmith over HTTPS only. No SSH: spec 9.4 reaches this host through AWS Systems
+        Manager, which is outbound.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref StaffCidr
+          Description: Staff to Appsmith over HTTPS (spec 9.4, 10.3)
+      SecurityGroupEgress:
+        # Outbound HTTPS only, which is every job this host has: SSM, Supabase, GitHub, S3 and the
+        # three worker invocations (§4.1). Anything else leaving this host is unexpected.
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: '0.0.0.0/0'
+          Description: SSM, Supabase, GitHub, S3 and the worker calls (spec 4.1, 13.3)
+        # Postgres to Supabase for migrations and the weekly dump (§13.3, §12.3). Supabase publishes
+        # no stable address range, so this is bounded by port rather than by destination — and
+        # §9.4's network restrictions are the other half, allowing only this host's IP inbound.
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: '0.0.0.0/0'
+          Description: Migrations and pg_dump against Supabase (spec 13.3, 12.3)
+        # §11.1: "The ops host syncs to NIC and NPL servers." Review found this actively prevented:
+        # specifying any egress rule at all replaces the default allow-all, so UDP 123 was dropped
+        # and the hand step in ManualStepsRemaining could not have succeeded — the host would have
+        # stayed on the Amazon Time Sync Service at the link-local address, which is neither NIC nor
+        # NPL. Of the three CERT-In duties this stack carries, that was the one the template was
+        # stopping rather than merely not doing.
+        - IpProtocol: udp
+          FromPort: 123
+          ToPort: 123
+          CidrIp: '0.0.0.0/0'
+          Description: NTP to NIC and NPL time servers (spec 11.1, spec 17 O9)
+      Tags:
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  OpsHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !GetAtt SecurityGroup.GroupId
+      # §9.4: "IMDSv2". Required rather than optional, so a request without a token is refused —
+      # the whole point, since IMDSv1's unauthenticated GET is how an SSRF reaches instance
+      # credentials.
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            # §9.4: "an encrypted disk".
+            Encrypted: true
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Monitoring: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'seva-${Environment}-ops-host'
+        - Key: seva:purpose
+          Value: appsmith-deploy-backup-cron
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  # §13.3: "one EC2 instance in Mumbai with a **fixed IP**", and §9.4: "Network restrictions allow
+  # direct database connections only from the ops host's fixed IP." The address has to survive a
+  # stop and start, or that restriction would lock the deploy runner out of its own database.
+  OpsHostAddress:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref OpsHost
+      Tags:
+        - Key: Name
+          Value: !Sub 'seva-${Environment}-ops-host'
+        - Key: seva:environment
+          Value: !Ref Environment
+
+Outputs:
+  OpsHostPublicIp:
+    Description: >-
+      Put this in Supabase network restrictions as the only allowed IPv4 address (spec 9.4), and
+      nowhere else.
+    Value: !Ref OpsHostAddress
+  OpsHostInstanceId:
+    Description: 'Connect with: aws ssm start-session --target <this> (spec 9.4, never SSH)'
+    Value: !Ref OpsHost
+  SecretsPrefix:
+    Description: >-
+      Where this host reads the database password and the three worker keys from (spec 9.5, 4.1).
+      Put each one in as a SecureString.
+    Value: !Sub '/seva/${Environment}/'
+  ManualStepsRemaining:
+    Description: >-
+      Spec 14.4, done by hand on the host after this stack: install Appsmith (spec 10.3), install
+      the GitHub self-hosted deploy runner (spec 13.3), schedule the weekly pg_dump (spec 12.3),
+      schedule the cron that calls each of the three workers on its own secret key with
+      ?forceFunctionRegion=ap-south-1 (spec 4.1, gate 12), and point chrony at NIC and NPL time
+      servers (spec 11.1, spec 17 O9) - the UDP 123 egress rule this stack adds is what lets that
+      work at all.
+    Value: >-
+      appsmith, deploy-runner, weekly-backup-cron, worker-cron, nic-npl-time-sync
