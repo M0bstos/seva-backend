@@ -244,6 +244,11 @@ Onboarded · 10/h · 30/day
 `activity_id`, `photo_ids` and `metrics` are optional. `201` with the Act, whose `status` is
 `pending`.
 
+**`category` is one of exactly six values** — `environment`, `animals`, `community`, `education`,
+`health`, `other` — and the same six apply to an Activity and to Discover's filter. Anything else is
+`400` naming `category`, refused in the function rather than by the database, so it never costs a
+retryable 500.
+
 - **A claimed metric needs a photo.** Without one, `422 EVIDENCE_REQUIRED`.
 - Metrics outside their per-Act bound are `422 METRIC_OUT_OF_RANGE`.
 - `photo_ids` must be photos you uploaded and completed.
@@ -347,6 +352,9 @@ Signed in · 20/day
 
 `subject_type` is `act`, `activity` or `profile`, and you must send exactly the matching id field —
 `act_id`, `activity_id` or `reported_user_id`. `details` is optional, 500 characters.
+
+**`reason` is one of exactly eight values**: `spam`, `inappropriate`, `unsafe`, `misleading`,
+`harassment`, `intimate_imagery`, `impersonation`, `other`.
 
 `201` with the report. **`200` means you already have an open report on that subject**, and the
 answer is the one on file; sending a more serious reason upgrades it rather than creating a second.

@@ -330,7 +330,7 @@ paths:
                 reported_user_id: { type: string, format: uuid, nullable: true }
                 reason:
                   type: string
-                  enum: [spam, misleading, harassment, hate, violence, unsafe, intimate_imagery, impersonation, other]
+                  enum: [spam, inappropriate, unsafe, misleading, harassment, intimate_imagery, impersonation, other]
                 details: { type: string, maxLength: 500, nullable: true }
       responses:
         '201': { description: Filed., content: { application/json: { schema: { type: object, properties: { report: { $ref: '#/components/schemas/Report' } } } } } }
@@ -509,7 +509,7 @@ components:
 
     Category:
       type: string
-      enum: [environment, education, health, community, animals, disaster_relief, elderly_care, other]
+      enum: [environment, animals, community, education, health, other]
 
     Profile:
       type: object
