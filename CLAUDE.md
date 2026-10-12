@@ -32,7 +32,7 @@ supabase/
   migrations/       hand-written SQL migrations, including bucket creation
   functions/        Edge Functions; shared code in _shared/
   tests/            pgTAP: security/ gates, rls/, rpc/, points/
-tests/              api/ end-to-end, languages/ moderation samples, load/ k6
+tests/              api/ end-to-end, smoke/ the §14.4 dry run, languages/ moderation samples, load/ k6
 ```
 
 Create Edge Function folders with `supabase functions new <name>` only when building them. The CLI treats every folder in `supabase/functions/` as a deployable function. Planned functions: `acts`, `activities`, `uploads`, `reports`, `account`, `discover`, `feed`, `sms-hook`, `moderation-worker`, `message-worker`, `ops-worker`.
@@ -45,7 +45,13 @@ deno task check      # format check, lint, type-check functions
 deno task test       # Edge Function tests
 deno task db:test    # reset local db, lint it, run pgTAP including security gates
 deno task test:api   # end-to-end API tests, needs a running stack
+deno task smoke      # §14.4's dry run: one real person, sign-up to erasure, against a live stack
 ```
+
+`deno task smoke` is not a unit suite and is not part of CI. It is the answer to "does the product
+work", which "the tests pass" does not give: one asserted walkthrough with real bytes, a real GoTrue
+session and real TOTP, through every route and worker in order. It also reports the three places that
+need an AWS account and fails on none of them, so it stays green on a laptop with no AWS at all.
 
 ## Code rules
 
