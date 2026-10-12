@@ -1,0 +1,603 @@
+# The nineteen SEVA Edge Function endpoints, as a machine-readable companion to reference/api.md.
+# That document is the one to read; this one is for generating clients and for diffing a change
+# against what the client team already builds against.
+#
+# Written by hand from `supabase/functions/`, 12 October 2026. Where the two disagree the code is
+# right. Table reads through PostgREST are deliberately out of scope — Supabase publishes its own
+# OpenAPI document for those at /rest/v1/.
+openapi: 3.1.0
+
+info:
+  title: SEVA backend
+  version: '1.0'
+  description: >-
+    Social-impact platform for an Indian government program. Supabase and AWS, both in Mumbai.
+    Sign-in is Supabase Auth phone OTP and is not described here. Every POST needs an
+    Idempotency-Key; a replay answers 200 with the original row and is not billed to a rate limit.
+
+servers:
+  - url: https://{projectRef}.supabase.co/functions/v1
+    variables:
+      projectRef:
+        default: your-project-ref
+
+security:
+  - apiKey: []
+    bearerAuth: []
+
+tags:
+  - name: account
+  - name: uploads
+  - name: acts
+  - name: activities
+  - name: reports
+  - name: discover
+    description: The only endpoints callable without a session.
+  - name: feed
+
+paths:
+  /account/onboarding:
+    post:
+      tags: [account]
+      summary: Create the profile. Every write returns ONBOARDING_REQUIRED until this succeeds.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/Region' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name, date_of_birth, terms_version, privacy_version]
+              properties:
+                display_name: { type: string, minLength: 2, maxLength: 50 }
+                date_of_birth:
+                  type: string
+                  format: date
+                  description: 13 or over on the Asia/Kolkata day, and within the last 150 years.
+                terms_version: { type: string }
+                privacy_version: { type: string }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Profile' } } } }
+        '200': { description: Already onboarded; the profile on file. }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /account/delete:
+    post:
+      tags: [account]
+      summary: Schedule erasure. Does not require onboarding.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/Region' }]
+      responses:
+        '202':
+          description: Scheduled, or the request already on file.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deletion:
+                    type: object
+                    properties:
+                      status: { type: string, enum: [pending] }
+                      requested_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /account/export:
+    post:
+      tags: [account]
+      summary: Queue an export of everything held about you.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/Region' }]
+      responses:
+        '202':
+          description: Queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { export_id: { type: string, format: uuid } }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /account/export/{id}:
+    get:
+      tags: [account]
+      summary: Poll an export. The URL is signed for one hour; the file is deleted after seven days.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/Region' }
+      responses:
+        '200':
+          description: The export's state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [pending, ready, expired, failed] }
+                  url: { type: string, format: uri, description: Present only when ready. }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /uploads:
+    post:
+      tags: [uploads]
+      summary: Step 1. A photo id and a one-time signed upload URL.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/Region' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [purpose]
+              properties:
+                purpose: { type: string, enum: [act, activity, avatar] }
+      responses:
+        '201':
+          description: >-
+            PUT the JPEG to upload_url with Content-Type image/jpeg, then call the complete
+            endpoint. At most 5 MB and 2048 px on the long edge.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  photo: { $ref: '#/components/schemas/Photo' }
+                  upload_url: { type: string, format: uri }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+
+  /uploads/{id}/complete:
+    post:
+      tags: [uploads]
+      summary: Step 3. Confirm the object and queue screening. Safe to call twice.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/Region' }
+      responses:
+        '200':
+          description: The photo is processing. It is not published yet.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { photo: { $ref: '#/components/schemas/Photo' } }
+        '400': { description: 'The object is missing or too large; message names "file".', $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /acts:
+    post:
+      tags: [acts]
+      summary: Create an Act. Status pending until screening passes.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/Region' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, story, category, occurred_on, lon, lat]
+              properties:
+                title: { type: string }
+                story: { type: string }
+                category: { $ref: '#/components/schemas/Category' }
+                occurred_on: { type: string, format: date }
+                lon: { type: number, minimum: -180, maximum: 180 }
+                lat: { type: number, minimum: -90, maximum: 90 }
+                activity_id: { type: string, format: uuid, nullable: true }
+                photo_ids: { type: array, items: { type: string, format: uuid } }
+                metrics:
+                  type: object
+                  additionalProperties: { type: number }
+                  description: A claimed metric needs at least one photo, or 422 EVIDENCE_REQUIRED.
+      responses:
+        '201': { description: Created, pending., content: { application/json: { schema: { type: object, properties: { act: { $ref: '#/components/schemas/Act' } } } } } }
+        '200': { description: An idempotent replay of the same request. }
+        '422': { description: EVIDENCE_REQUIRED, METRIC_OUT_OF_RANGE or IDEMPOTENCY_KEY_REUSED., $ref: '#/components/responses/Error' }
+
+  /acts/{id}:
+    patch:
+      tags: [acts]
+      summary: Edit the title or story. Sends the Act back to pending and re-screens it.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/Region' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                title: { type: string }
+                story: { type: string }
+      responses:
+        '200': { description: Edited and re-queued for screening. }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /activities:
+    post:
+      tags: [activities]
+      summary: Create an Activity. 18+ only.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/Region' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, description, category, starts_at, ends_at, lon, lat, location_label, capacity]
+              properties:
+                title: { type: string }
+                description: { type: string }
+                category: { $ref: '#/components/schemas/Category' }
+                starts_at: { type: string, format: date-time, description: ISO 8601 with an offset. }
+                ends_at: { type: string, format: date-time }
+                lon: { type: number }
+                lat: { type: number }
+                location_label: { type: string }
+                capacity: { type: integer, minimum: 1 }
+                what_to_bring: { type: string, nullable: true }
+                campaign_id: { type: string, format: uuid, nullable: true }
+                photo_ids: { type: array, items: { type: string, format: uuid } }
+      responses:
+        '201': { description: Created, pending. }
+        '403': { description: AGE_RESTRICTED under 18., $ref: '#/components/responses/Error' }
+
+  /activities/{id}/join:
+    post:
+      tags: [activities]
+      summary: Join under a capacity lock. Joining twice is not an error.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/Region' }
+      responses:
+        '200':
+          description: Joined, or already joined.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  joined_at: { type: string, format: date-time }
+                  already_joined: { type: boolean }
+                  participant_count: { type: integer }
+        '409': { description: ACTIVITY_FULL or ACTIVITY_NOT_JOINABLE., $ref: '#/components/responses/Error' }
+
+  /activities/{id}/leave:
+    post:
+      tags: [activities]
+      summary: Free the place.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/Region' }
+      responses:
+        '200': { description: Left. }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /activities/{id}/cancel:
+    post:
+      tags: [activities]
+      summary: Cancel and message everyone who joined. Organiser only.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/Region' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties: { reason: { type: string } }
+      responses:
+        '200':
+          description: Cancelled. notified counts messages queued, not delivered.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notified: { type: integer }
+                  cancelled_at: { type: string, format: date-time }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /reports:
+    post:
+      tags: [reports]
+      summary: >-
+        Report an Act, Activity or person. Send exactly the id field matching subject_type. A 200
+        means an open report already exists on that subject and is the one returned.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/Region' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject_type, reason]
+              properties:
+                subject_type: { type: string, enum: [act, activity, profile] }
+                act_id: { type: string, format: uuid, nullable: true }
+                activity_id: { type: string, format: uuid, nullable: true }
+                reported_user_id: { type: string, format: uuid, nullable: true }
+                reason:
+                  type: string
+                  enum: [spam, misleading, harassment, hate, violence, unsafe, intimate_imagery, impersonation, other]
+                details: { type: string, maxLength: 500, nullable: true }
+      responses:
+        '201': { description: Filed., content: { application/json: { schema: { type: object, properties: { report: { $ref: '#/components/schemas/Report' } } } } } }
+        '200': { description: A replay, or the open report already on file. }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /discover:
+    get:
+      tags: [discover]
+      summary: Nearby upcoming Activities. No session needed. Cached 60 seconds.
+      security: [{ apiKey: [] }]
+      parameters:
+        - { name: lon, in: query, required: true, schema: { type: number } }
+        - { name: lat, in: query, required: true, schema: { type: number } }
+        - { name: radius_km, in: query, schema: { type: number }, description: Snapped to a rung. }
+        - { name: category, in: query, schema: { $ref: '#/components/schemas/Category' } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer }, description: Clamped. }
+        - { $ref: '#/components/parameters/Region' }
+      responses:
+        '200':
+          description: A page of Activities, nearest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  activities: { type: array, items: { $ref: '#/components/schemas/DiscoveredActivity' } }
+                  next_cursor: { type: string, nullable: true }
+        '400': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /discover/activities/{id}:
+    get:
+      tags: [discover]
+      summary: One Activity, for a shared link. Still served after cancellation.
+      security: [{ apiKey: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/Region' }
+      responses:
+        '200': { description: The Activity. }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /discover/campaigns:
+    get:
+      tags: [discover]
+      summary: Active campaigns with progress.
+      security: [{ apiKey: [] }]
+      parameters: [{ $ref: '#/components/parameters/Region' }]
+      responses:
+        '200': { description: The campaigns. }
+
+  /discover/campaigns/{id}:
+    get:
+      tags: [discover]
+      summary: One campaign, for a shared link.
+      security: [{ apiKey: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/Region' }
+      responses:
+        '200': { description: The campaign. }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /discover/health:
+    get:
+      tags: [discover]
+      summary: >-
+        ok or degraded, and nothing else. degraded is a moderation or job backlog for operations,
+        not an outage — show an offline state only when this cannot be reached at all.
+      security: []
+      responses:
+        '200':
+          description: The status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { type: string, enum: [ok, degraded] } }
+        '503': { description: The database could not be reached. }
+
+  /feed:
+    get:
+      tags: [feed]
+      summary: Recent published Acts nearby, with blocked authors removed. Cached 60 seconds.
+      parameters:
+        - { name: lon, in: query, required: true, schema: { type: number } }
+        - { name: lat, in: query, required: true, schema: { type: number } }
+        - { name: radius_km, in: query, schema: { type: number } }
+        - { name: category, in: query, schema: { $ref: '#/components/schemas/Category' } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer } }
+        - { $ref: '#/components/parameters/Region' }
+      responses:
+        '200':
+          description: A page of Acts, most recent first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  acts: { type: array, items: { $ref: '#/components/schemas/FeedAct' } }
+                  next_cursor: { type: string, nullable: true }
+        '401': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: apikey
+      description: The project's publishable key. Never the secret key.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: The signed-in person's Supabase Auth access token.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+      description: >-
+        One UUID per logical action, reused on every retry. Same key and same body replays the
+        original with a 200; same key and a different body is 422 IDEMPOTENCY_KEY_REUSED.
+    Region:
+      name: x-region
+      in: header
+      required: false
+      schema: { type: string, enum: [ap-south-1] }
+      description: SEVA runs in Mumbai only.
+
+  responses:
+    Error:
+      description: The single error shape every endpoint uses.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, retryable]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_FAILED
+                - UNAUTHENTICATED
+                - ONBOARDING_REQUIRED
+                - AGE_RESTRICTED
+                - FORBIDDEN
+                - NOT_FOUND
+                - ACTIVITY_FULL
+                - ACTIVITY_NOT_JOINABLE
+                - IDEMPOTENCY_KEY_REUSED
+                - EVIDENCE_REQUIRED
+                - METRIC_OUT_OF_RANGE
+                - DAILY_LIMIT_REACHED
+                - RATE_LIMITED
+                - FEATURE_DISABLED
+                - INTERNAL
+            message:
+              type: string
+              description: For a person to read. Branch on code, never on this.
+            retryable:
+              type: boolean
+              description: Whether trying again can possibly help.
+
+    Category:
+      type: string
+      enum: [environment, education, health, community, animals, disaster_relief, elderly_care, other]
+
+    Profile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        display_name: { type: string }
+        bio: { type: string, nullable: true }
+        status: { type: string, enum: [active, suspended] }
+
+    Photo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [uploading, processing, ready, held, removed, rejected]
+          description: >-
+            Only `ready` is published. `processing` is not an error state. A client never sets this.
+
+    Act:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        story: { type: string }
+        category: { $ref: '#/components/schemas/Category' }
+        occurred_on: { type: string, format: date }
+        status:
+          type: string
+          enum: [pending, visible, held, removed]
+          description: pending until screening passes. Invisible to everyone but the author.
+
+    FeedAct:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        author_id: { type: string, format: uuid }
+        title: { type: string }
+        story: { type: string }
+        category: { $ref: '#/components/schemas/Category' }
+        occurred_on: { type: string, format: date }
+        activity_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time, nullable: true }
+        distance_m:
+          type: integer
+          description: >-
+            From the coarsened location, which is on about a 5 km grid. Never draw an Act as a
+            precise pin.
+        photos:
+          type: array
+          items:
+            type: object
+            properties:
+              public_path:
+                type: string
+                description: >-
+                  A key in the public media bucket:
+                  /storage/v1/object/public/media/{public_path}. A 4xx on the image means the photo
+                  was removed, not that the request failed.
+              thumb_path: { type: string, nullable: true }
+              width: { type: integer, nullable: true }
+              height: { type: integer, nullable: true }
+        metrics:
+          type: object
+          additionalProperties: { type: number }
+
+    DiscoveredActivity:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        category: { $ref: '#/components/schemas/Category' }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        lon: { type: number, description: Exact. An Activity's meeting point is public by design. }
+        lat: { type: number }
+        location_label: { type: string }
+        capacity: { type: integer }
+        participant_count: { type: integer }
+        distance_m: { type: integer }
+        organiser_id: { type: string, format: uuid }
+        campaign_id: { type: string, format: uuid, nullable: true }
+
+    Report:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [open, actioned, dismissed] }
+        reason: { type: string }
+        created_at: { type: string, format: date-time }
