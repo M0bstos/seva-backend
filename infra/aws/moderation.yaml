@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# §13.3's `moderation` stack: "The Bedrock guardrail".
+#
+# §8.2 is the contract: "The worker calls Bedrock Guardrails' `ApplyGuardrail` with content filters
+# for hate, insults, sexual content, violence and misconduct. Filter strength starts at *medium*
+# and is tuned against the language test set (§13.1)."
+#
+# §14.3 bounds what else it may do: "the guardrail's own policies limited to §8.2's content
+# filters — a PII or denied-topics policy would make `ApplyGuardrail` intervene for reasons §8.2
+# did not ask for". So this template declares exactly five filters and no other policy: no
+# `TopicPolicyConfig`, no `SensitiveInformationPolicyConfig`, no `WordPolicyConfig`,
+# no `ContextualGroundingPolicyConfig`.
+#
+# **Two things this stack does not do.** The cross-region inference profile §4.2 and §11.4 require —
+# "The guardrail uses a cross-region profile, because the Standard tier requires one" — is a
+# property of how the worker invokes rather than of the guardrail resource, and §14.3 ticks it as
+# "Guardrail live in its cross-region profile". And §16 week 1's spike is still open: whether
+# Rekognition and Guardrails answer from a function in Mumbai "needs an AWS account and is still
+# open", so nothing here has been deployed or measured.
+Description: >-
+  SEVA's Bedrock guardrail: five content filters at medium, and no other policy (spec 8.2, 14.3).
+  Deploy in ap-south-1.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+    Description: >-
+      Spec 12.7 gives staging "its own AWS key and guardrail", so each environment has its own and
+      a threshold tuned on staging cannot move production's.
+  AlarmTopicArn:
+    Type: String
+    Description: >-
+      AlarmTopicArn from the monitoring stack. Used by one EventBridge rule, so that a change to
+      Bedrock model-invocation logging is noticed rather than only checked once at launch
+      (spec 14.3, 17).
+  FilterStrength:
+    Type: String
+    Default: MEDIUM
+    AllowedValues: [NONE, LOW, MEDIUM, HIGH]
+    Description: >-
+      Spec 8.2: "Filter strength starts at *medium* and is tuned against the language test set
+      (§13.1)." A parameter rather than a constant because the tuning is a deploy, not a code
+      change — and spec 14.3 requires the language test set to meet agreed thresholds before
+      launch, which is what moves it.
+
+Resources:
+  Guardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Sub 'seva-${Environment}-content'
+      Description: >-
+        Screens Act, Activity and profile text before it is published (spec 8.2). Content filters
+        only: a PII or denied-topics policy would intervene for reasons spec 8.2 did not ask for.
+      # §8.2 says nothing goes public until it has been screened, so a failure to screen must not
+      # read as a pass. These two strings are what a caller sees when the guardrail intervenes;
+      # the worker reads `action` rather than the text, and §9.8 keeps the screened text out of
+      # anything it logs.
+      BlockedInputMessaging: 'This text cannot be published.'
+      BlockedOutputsMessaging: 'This text cannot be published.'
+      ContentPolicyConfig:
+        FiltersConfig:
+          # §8.2's five, in its own order. `InputStrength` is what matters: the worker calls
+          # `ApplyGuardrail` with `source: INPUT` because it is screening what a person wrote
+          # rather than what a model produced, so the output strength is NONE on every filter.
+          - Type: HATE
+            InputStrength: !Ref FilterStrength
+            OutputStrength: NONE
+          - Type: INSULTS
+            InputStrength: !Ref FilterStrength
+            OutputStrength: NONE
+          - Type: SEXUAL
+            InputStrength: !Ref FilterStrength
+            OutputStrength: NONE
+          - Type: VIOLENCE
+            InputStrength: !Ref FilterStrength
+            OutputStrength: NONE
+          - Type: MISCONDUCT
+            InputStrength: !Ref FilterStrength
+            OutputStrength: NONE
+      Tags:
+        - Key: seva:purpose
+          Value: text-screening
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  # §9.5 scopes the function key to a guardrail *version*, and §8.2's tuning changes the draft. A
+  # published version is immutable, so the worker screens against a known configuration rather
+  # than against whatever the console last saved.
+  GuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Properties:
+      GuardrailIdentifier: !GetAtt Guardrail.GuardrailId
+      Description: !Sub 'Filters at ${FilterStrength} (spec 8.2)'
+
+  # §17 leaves Bedrock model-invocation logging undecided, and this stack does not answer it — it is
+  # an account setting with no CloudFormation resource, which is why it sits in the manual steps
+  # below. What review found missing is any way to *notice* it changing: if it is ever switched on,
+  # the serving region writes the `ApplyGuardrail` input, which is the user's own text, in a region
+  # that under a cross-region profile is not pinned to Mumbai (§11.4, §9.6).
+  #
+  # So this rule turns a one-time §14.3 tick into a standing control. It does not decide the
+  # question; it makes the answer observable, which is the most a template can honestly do while the
+  # question is open.
+  ModelLoggingChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'seva-${Environment}-bedrock-logging-changed'
+      Description: >-
+        Bedrock model-invocation logging configuration changed. Spec 17 leaves whether it may be on
+        undecided, and spec 11.4 is why it matters: the serving region would write the user's own
+        text. Check what was changed and by whom in CloudTrail (spec 11.1).
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.bedrock
+        detail-type:
+          - 'AWS API Call via CloudTrail'
+        detail:
+          eventSource:
+            - bedrock.amazonaws.com
+          eventName:
+            - PutModelInvocationLoggingConfiguration
+            - DeleteModelInvocationLoggingConfiguration
+      Targets:
+        - Id: alarm-topic
+          Arn: !Ref AlarmTopicArn
+
+Outputs:
+  GuardrailArn:
+    Description: Pass to the iam stack as GuardrailArn (spec 9.5 scopes ApplyGuardrail to it)
+    Value: !GetAtt Guardrail.GuardrailArn
+  GuardrailId:
+    Description: >-
+      Put in the SEVA_GUARDRAIL_ID function secret. The moderation worker reads it at boot and
+      throws without it, so a missing one fails the deploy rather than the first job (spec 9.5).
+    Value: !GetAtt Guardrail.GuardrailId
+  GuardrailVersion:
+    Description: >-
+      Put in the SEVA_GUARDRAIL_VERSION function secret (spec 9.5, 14.3).
+    Value: !GetAtt GuardrailVersion.Version
+  ManualStepsRemaining:
+    Description: >-
+      Spec 14.3, done by hand after this stack: confirm the cross-region inference profile the
+      Standard tier requires (spec 4.2, 11.4), confirm Bedrock model-invocation logging is off or
+      confined to ap-south-1 - an EventBridge rule in this stack now reports any later change to
+      it - verify the cross-region profile's actual destination regions with GetInferenceProfile
+      from ap-south-1 rather than trusting the profile's prefix (spec 11.4), and run the language
+      test set against this guardrail (spec 13.1, spec 17 O10). Spec 16 week 1's spike — whether Guardrails answers from a function in
+      Mumbai — is still open and needs an AWS account.
+    Value: >-
+      cross-region-profile, profile-destination-regions, model-invocation-logging-off,
+      language-test-set, mumbai-latency-spike
