@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(21);
+select plan(23);
 
 insert into auth.users (id, created_at)
 select ('00000000-0000-0000-0000-00000000000' || n)::uuid, now() - interval '30 days'
@@ -293,5 +293,47 @@ select is(
 );
 
 reset role;
+-- **A subject-less open report is not a backlog**, which was a compliance defect: §5.2.1
+-- nulls a report's subject when §5.4's account deletion removes the content, and its own
+-- check keeps `status = 'open'` without a `resolved_at` — so one deleted account used to pin
+-- this answer at `degraded` for ever, masking §10.4's 45- and 60-minute legal arms behind a
+-- signal nobody could clear.
+insert into auth.users (id, created_at)
+values ('cccc0000-0000-0000-0000-00000000dead', now() - interval '30 days');
+insert into profiles (id, display_name)
+values ('cccc0000-0000-0000-0000-00000000dead', 'reporter');
+insert into reports (reporter_id, subject_type, act_id, reason, created_at,
+                     idempotency_key, request_hash)
+values ('cccc0000-0000-0000-0000-00000000dead', 'act', null, 'intimate_imagery',
+        now() - interval '3 hours', '00000000-0000-0000-0000-0000000000de', repeat('d', 64));
+
+delete from private.discover_cache where cache_key = 'discover:health';
+select is(
+  health_status(),
+  'ok',
+  'an open report whose subject is gone is not counted, so the alarm stays clearable'
+);
+
+-- And one that still names its subject is counted, so the arm itself still works.
+insert into acts (id, author_id, title, story, category, occurred_on, location_coarse,
+                  status, text_checked, idempotency_key, request_hash)
+values ('cccc0000-0000-0000-0000-0000000000ac', 'cccc0000-0000-0000-0000-00000000dead',
+        'Still here', 'An act that is still there for the report below to name.',
+        'other', '2026-10-12',
+        extensions.st_setsrid(extensions.st_makepoint(73.85, 18.52), 4326)::extensions.geography,
+        'visible', true, '00000000-0000-0000-0000-0000000000ac', repeat('c', 64));
+insert into reports (reporter_id, subject_type, act_id, reason, created_at,
+                     idempotency_key, request_hash)
+values ('cccc0000-0000-0000-0000-00000000dead', 'act',
+        'cccc0000-0000-0000-0000-0000000000ac', 'intimate_imagery',
+        now() - interval '3 hours', '00000000-0000-0000-0000-0000000000df', repeat('f', 64));
+
+delete from private.discover_cache where cache_key = 'discover:health';
+select is(
+  health_status(),
+  'degraded',
+  'while one that still names its subject fires §10.4''s 45-minute arm as before'
+);
+
 select * from finish();
 rollback;
