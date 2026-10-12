@@ -1,0 +1,284 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# The second half of §13.3's `monitoring` row: "health-check alarms in `us-east-1`". §12.5 says why
+# it is a second stack and not a second resource — "The alarms sit in `us-east-1`, where Route 53
+# publishes its metrics; only metrics go there, never user data" — and one CloudFormation template
+# cannot span two regions.
+#
+# **Two checks, because the route carries two signals**, which §12.5 spells out and §17.1 records as
+# an owner correction: "Availability is a plain `HTTPS` check, which a 200 passes however the body
+# reads. The backlog is an `HTTPS_STR_MATCH` check searching the body for `ok`, which fails on a 200
+# carrying `degraded` — that is the 'text match' the row above alarms on, and it has to be
+# configured as one rather than assumed."
+#
+# §17.1 records what the split is for: `/discover/health` answers 503 only when it cannot get an
+# answer out of the database, and 200 with `degraded` for a §10.4 backlog. "Under the original
+# contract an unreviewed report would have taken the app's banner down while every route was
+# serving" — §12.4 has the app show its offline state when the availability check fails.
+Description: >-
+  SEVA availability and backlog monitoring: the two Route 53 health checks spec 12.5 names and the
+  CloudWatch alarms over them. Deploy in us-east-1, where Route 53 publishes its metrics.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+  ProjectHost:
+    Type: String
+    Description: >-
+      The Supabase project host, for example abcdefgh.supabase.co. The checked path is
+      /functions/v1/discover/health?forceFunctionRegion=ap-south-1 - spec 12.5 pins the region with
+      the query parameter and not the x-region header, "because Route 53 cannot set headers".
+    AllowedPattern: '^[a-z0-9.-]+\.[a-z]{2,}$'
+  OnCallEmail:
+    Type: String
+    Description: >-
+      The same on-call address as the ap-south-1 monitoring stack. A separate topic is needed
+      because a CloudWatch alarm can only publish to a topic in its own region.
+  OnCallPhone:
+    Type: String
+    AllowedPattern: '^\+[1-9][0-9]{7,14}$'
+
+Resources:
+  HealthAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'seva-${Environment}-health-alarms'
+      DisplayName: SEVA health
+      Tags:
+        - Key: seva:purpose
+          Value: route53-health-alarms
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  HealthAlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref HealthAlarmTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref HealthAlarmTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+  HealthEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref HealthAlarmTopic
+      Protocol: email
+      Endpoint: !Ref OnCallEmail
+
+  HealthSmsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref HealthAlarmTopic
+      Protocol: sms
+      Endpoint: !Ref OnCallPhone
+
+  # §12.5's Availability row: "Route 53 health checks on `/discover/health` and the Data API | 3
+  # failed checks in a row". A plain HTTPS check, which "a 200 passes however the body reads" — so
+  # a §10.4 backlog does not take the app's banner down (§12.4).
+  #
+  # Settings from §12.5: "Both: 30-second interval, 3 checker regions (the minimum), failure
+  # threshold 3."
+  AvailabilityCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref ProjectHost
+        Port: 443
+        ResourcePath: '/functions/v1/discover/health?forceFunctionRegion=ap-south-1'
+        RequestInterval: 30
+        FailureThreshold: 3
+        MeasureLatency: true
+        EnableSNI: true
+        Regions:
+          # The minimum three, all in the geography §11.4 licenses. The earlier list had
+          # `eu-west-1` on a "closest to Mumbai" claim that was both unmeasured — there is no
+          # account to measure latency from — and arguable, since eu-west-1 is nearer Mumbai than
+          # ap-southeast-2. Route 53 offers three APAC checkers, so none of that matters: no check
+          # has to leave the region. Nothing user-shaped reaches a checker either way — the body is
+          # `{"status":"ok"}` or `{"status":"degraded"}` and nothing else.
+          - ap-southeast-1
+          - ap-southeast-2
+          - ap-northeast-1
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub 'seva-${Environment}-availability'
+        - Key: seva:purpose
+          Value: availability
+
+  # §12.5's "Availability | Route 53 health checks on `/discover/health` **and the Data API**". The
+  # Data API answers without a token on its root path, so a plain HTTPS check is the right shape;
+  # §9.1 gives `anon` no table grants, so nothing is readable through it either way.
+  DataApiCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref ProjectHost
+        Port: 443
+        ResourcePath: '/rest/v1/'
+        RequestInterval: 30
+        FailureThreshold: 3
+        MeasureLatency: true
+        EnableSNI: true
+        Regions:
+          - ap-southeast-1
+          - ap-southeast-2
+          - ap-northeast-1
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub 'seva-${Environment}-data-api'
+        - Key: seva:purpose
+          Value: availability
+
+  # §12.5's backlog signal: "an `HTTPS_STR_MATCH` check searching the body for `ok`, which fails on
+  # a 200 carrying `degraded`". §17.1 is explicit that this had to be configured as a string match
+  # rather than assumed — "a status check reads a 200 as healthy, so the backlog alarm, whose trigger
+  # §12.5 states as 'the health check's text match fails', would have had no source at all".
+  #
+  # `ok` and not `degraded`: the check passes when it finds the string, so searching for the healthy
+  # word is what makes the unhealthy answer a failure. `/discover/health` "returns
+  # `{"status":"ok"}` or `{"status":"degraded"}` and nothing else", and `degraded` does not contain
+  # `ok`.
+  #
+  # **The string is `"status":"ok"` and not `ok`**, which review corrected. Route 53 looks for the
+  # string anywhere in the first 5120 bytes of the body, and the reasoning for the bare word only
+  # considered the two bodies the function itself returns — not the bodies that appear when the
+  # function is never reached. `ok` is a substring of `token` and of `Cookie`, so a gateway or auth
+  # error shaped like `{"msg":"… authorization token"}` would have passed this check while the route
+  # was failing. This check is the only signal behind §10.4's 45-minute `intimate_imagery` alarm and
+  # §11.6's two-hour deadline, so a false healthy here is a legal clock expiring with nothing paged.
+  BacklogCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS_STR_MATCH
+        SearchString: '"status":"ok"'
+        FullyQualifiedDomainName: !Ref ProjectHost
+        Port: 443
+        ResourcePath: '/functions/v1/discover/health?forceFunctionRegion=ap-south-1'
+        RequestInterval: 30
+        FailureThreshold: 3
+        MeasureLatency: true
+        EnableSNI: true
+        Regions:
+          - ap-southeast-1
+          - ap-southeast-2
+          - ap-northeast-1
+      HealthCheckTags:
+        - Key: Name
+          Value: !Sub 'seva-${Environment}-backlog'
+        - Key: seva:purpose
+          Value: backlog
+
+  # §12.4: "The app shows its offline state when `/discover/health` fails." This is the alarm that
+  # says a Mumbai outage has happened, so it is the one §12.6's "Mumbai outage" step reads.
+  AvailabilityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'seva-${Environment}-availability'
+      AlarmDescription: >-
+        Spec 12.5: three failed checks in a row on /discover/health. Spec 12.4 makes a Mumbai
+        outage a full outage, so this is the signal that there is no read path at all.
+      AlarmActions:
+        - !Ref HealthAlarmTopic
+      OKActions:
+        - !Ref HealthAlarmTopic
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !Ref AvailabilityCheck
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      ComparisonOperator: LessThanThreshold
+      Threshold: 1
+      # A health check that stops reporting is not healthy. `breaching` is deliberate here and
+      # `missing` is deliberate on the scanner's alarms: there the metric does not exist yet, and
+      # here it exists and has gone quiet.
+      TreatMissingData: breaching
+
+  DataApiAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'seva-${Environment}-data-api'
+      AlarmDescription: 'Spec 12.5: three failed checks in a row on the Data API.'
+      AlarmActions:
+        - !Ref HealthAlarmTopic
+      OKActions:
+        - !Ref HealthAlarmTopic
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !Ref DataApiCheck
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      ComparisonOperator: LessThanThreshold
+      Threshold: 1
+      TreatMissingData: breaching
+
+  # §12.5's "Stuck screening, held content, report backlog, dead and waiting jobs" row, whose
+  # trigger is "The health check's text match fails". Eleven arms feed it (§17.1's `O35`), and
+  # §12.6 is explicit that the answer cannot say which — "a page at 45 minutes into a two-hour
+  # deadline reads the same as a dead job" — so this alarm's description carries the triage order
+  # rather than leaving an operator to find it.
+  BacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'seva-${Environment}-backlog'
+      AlarmDescription: >-
+        Spec 12.5: /discover/health answered 200 with "degraded". It cannot say which of its eleven
+        arms fired (spec 17 O35), so check in spec 12.6's order - the intimate_imagery and
+        impersonation queues first because those clocks are legal (spec 10.4, 11.6); then held
+        content past 20 hours; then open reports past 18; then pgmq.a_moderation, a_email and a_ops
+        for archived jobs; then anything pending or processing 15 minutes.
+      AlarmActions:
+        - !Ref HealthAlarmTopic
+      OKActions:
+        - !Ref HealthAlarmTopic
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !Ref BacklogCheck
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      ComparisonOperator: LessThanThreshold
+      Threshold: 1
+      TreatMissingData: breaching
+
+Outputs:
+  AvailabilityCheckId:
+    Description: Spec 12.5's plain HTTPS check on /discover/health
+    Value: !Ref AvailabilityCheck
+  DataApiCheckId:
+    Description: Spec 12.5's plain HTTPS check on the Data API
+    Value: !Ref DataApiCheck
+  BacklogCheckId:
+    Description: >-
+      Spec 12.5's HTTPS_STR_MATCH check, which fails on a 200 carrying "degraded" (spec 17.1)
+    Value: !Ref BacklogCheck
+  HealthAlarmTopicArn:
+    Description: >-
+      The us-east-1 topic these alarms publish to. Separate from the ap-south-1 one because a
+      CloudWatch alarm can only publish to a topic in its own region; only metrics and alarm text
+      cross the boundary, never user data (spec 12.5).
+    Value: !Ref HealthAlarmTopic
