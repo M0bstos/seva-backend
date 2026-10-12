@@ -155,7 +155,14 @@ deno task test        # 196 Edge Function tests
 deno task test:api    # 55 end-to-end tests
 deno task smoke       # the §14.4 dry run: one real person, sign-up to erasure
 cfn-lint infra/aws/*.yaml
+k6 run -e BASE=http://127.0.0.1:54321 -e KEY=<publishable> tests/load/discover.js
 ```
+
+The load script's own README is the thing to read before trusting its numbers: §12.2 limits Discover
+per IP, so a single generator is refused almost everything and k6's built-in failure rate reads
+~99% while nothing is actually wrong. Measured on a laptop, 40,600 requests in 15 seconds produced
+**no 5xx at all**, which is the first evidence for D5's trade-off — a flood reaches Postgres, and
+each refusal costs one cheap indexed write.
 
 `deno task smoke` is the one to run when somebody asks whether the product works. It takes a real
 account through sign-up, onboarding, a photo upload with real bytes, an Act, a staff approval with
