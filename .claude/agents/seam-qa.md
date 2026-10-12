@@ -79,10 +79,43 @@ counts so your coverage is legible:
 - every function that writes a column another function guards on;
 - every TTL and every trigger-maintained column.
 
+**Get the totals from the system, not from your own greps.** The first agent to run this said the
+counts mattered more than anything else in this file, because they are what tells you a grep was
+complete rather than merely plausible — and that it knew within five minutes. Run this first:
+
+```bash
+printf 'pgmq.send sites:   %s\n' "$(grep -rho 'pgmq\.send(' supabase/migrations/*.sql | wc -l)"
+printf 'pgmq.read sites:   %s\n' "$(grep -rlo 'pgmq\.read' supabase/migrations/*.sql | wc -l)"
+docker exec supabase_db_seva-backend psql -U postgres -At -c "
+  select 'fk delete actions: ' || count(*) || ' (' ||
+         string_agg(distinct confdeltype::text, ',') || ')'
+    from pg_constraint c join pg_class t on t.oid = c.conrelid
+    join pg_namespace n on n.oid = t.relnamespace
+   where c.contype = 'f' and n.nspname in ('public','private');
+  select 'after-delete triggers: ' || coalesce(string_agg(c.relname, ', '), 'none')
+    from pg_trigger g join pg_class c on c.oid = g.tgrelid
+   where not g.tgisinternal and pg_get_triggerdef(g.oid) ilike '%after delete%';
+  select 'functions: ' || count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname in ('public','private');
+  select 'policies: ' || count(*) from pg_policies where schemaname = 'public';"
+```
+
+The last two queries are worth reading closely rather than counting: **the tables with an
+`after delete` trigger are the only ones whose rows can clean up after a cascade**, and a clock or a
+Storage object on a table without one is the first place to look. One finding came straight out of
+that line.
+
 Then take the cross product that matters — subject × intervening event × reader — and for each
 plausible pair, decide whether it is reachable by an ordinary sequence of API calls or staff
-actions. Discard anything needing two actors at the same instant unless the consequence is severe
-and unrecoverable; say that you discarded it and why.
+actions.
+
+**Before discarding anything as a race, check whether it is one.** Discard only what needs two
+actors acting at the same instant, or one actor whose two calls must interleave inside a window
+nobody controls — and say what you discarded and why. **Two ordinary calls by one person, in an
+order nothing prevents, is not a race**; neither is a job claimed after a cascade already ran. The
+first agent to run this nearly dropped a real finding on that reading and built a harness to
+simulate a dying worker before noticing the plain sequence reached it. When in doubt, try the plain
+sequence first: it is cheaper than a harness and it is what a user will actually do.
 
 **Reproduce, do not reason.** A local stack is running. Use it:
 
@@ -99,10 +132,18 @@ and unrecoverable; say that you discarded it and why.
 mid-run, and a reset destroys the data a reproduction needs. Roll back every transaction. If you
 need a fixture, create it through the API as a new account rather than mutating an existing row.
 
-**Check §17.1 before reporting.** About twenty of these are already recorded, several with the
-reasoning for why the current behaviour is deliberate. Re-reporting a settled decision as a defect
-wastes the owner's attention; finding that a recorded decision has since been contradicted by new
-code is a real finding, and a valuable one.
+**Check §17.1 before reporting, through the index.** `docs/SEVA-17-1-index.md` is one line per row —
+line number, sections, the row's own summary, the identifiers it names — covering §17.1's amendments
+and §17's open items together. Grep it for a section number, an `O` number or an identifier, then
+read the full row at that line in the spec. Do not read §17.1 start to finish: it is about 340 rows
+of several hundred words and the first agent to run this lost twenty minutes of a bounded run to it,
+which is time that would otherwise have been findings. If the index's row count disagrees with the
+section, it is stale — regenerate it with `python3 docs/index-amendments.py`.
+
+Re-reporting a settled decision as a defect wastes the owner's attention, so name the row you
+checked and why it does not cover your finding. Say how many you had to discard: that number is how
+the owner calibrates you. Finding that a recorded decision has since been contradicted by newer code
+is a real finding, and a valuable one.
 
 ## Severity
 
