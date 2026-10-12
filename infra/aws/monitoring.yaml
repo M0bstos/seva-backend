@@ -1,0 +1,409 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+# §13.3's `monitoring` stack: "SNS, alarms and budgets; health-check alarms in `us-east-1`". The
+# health-check half is a second file — `monitoring-health.yaml` — because §12.5 is explicit about
+# why: "The alarms sit in `us-east-1`, where Route 53 publishes its metrics; only metrics go there,
+# never user data." One template cannot span two regions, so the row is two stacks.
+#
+# §12.5's table is the contract. Five of its seven rows are alarms here, one is the two Route 53
+# checks in the other file, and one — "Stuck screening, held content, report backlog, dead and
+# waiting jobs" — is `/discover/health`'s eleven arms, which are already built in Postgres and are
+# read through the `HTTPS_STR_MATCH` check rather than through CloudWatch.
+#
+# **The metrics these alarms watch are published by the log scanner, which is not built.** D12 is
+# "Log drain to S3 in Mumbai (kept 180 days), scanned into CloudWatch alarms", and §3.1 lists "One
+# small log-scanning function" among the things SEVA writes. The scanner is not in this phase's
+# scope and its runtime is a §3.3 dependency question nobody has answered, so this stack declares
+# the namespace and the metric names it must publish and the alarms that watch them. Until it
+# exists, every alarm here sits in INSUFFICIENT_DATA — which `TreatMissingData` deliberately does
+# **not** hide: a monitoring stack that reported OK with nothing feeding it would be worse than one
+# that reports nothing.
+Description: >-
+  SEVA monitoring: the on-call SNS topic, spec 12.5's CloudWatch alarms over the log scanner's
+  metrics, and spec 15's AWS Budgets. Deploy in ap-south-1; deploy monitoring-health.yaml in
+  us-east-1.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [staging, production]
+  OnCallEmail:
+    Type: String
+    Description: >-
+      Spec 12.5: "Alarms notify the on-call rota by email and phone through Amazon SNS." The
+      address is confirmed by clicking the subscription link AWS sends.
+  OnCallPhone:
+    Type: String
+    Description: >-
+      The on-call phone number in E.164 for the SMS half. Spec 10.4's two-hour and three-hour
+      deadlines "mean someone must be reachable around the clock" (spec 17 O8).
+    AllowedPattern: '^\+[1-9][0-9]{7,14}$'
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 700
+    Description: >-
+      Spec 15 totals 540-630 USD a month on the Pro plan. Spec 15's controls say "set AWS Budgets
+      alerts at 50%, 80% and 100%", and spec 12.5 alarms at "80% of the monthly budget".
+    MinValue: 1
+  MetricNamespace:
+    Type: String
+    Default: SEVA/Logs
+    Description: >-
+      The namespace the log scanner publishes into. Declared here so the scanner and these alarms
+      cannot disagree about it when the scanner is written.
+
+Resources:
+  # §12.5: "Alarms notify the on-call rota by email and phone through Amazon SNS." One topic, so
+  # §12.6's triage order is read from one place rather than from several inboxes.
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'seva-${Environment}-alarms'
+      DisplayName: SEVA
+      Tags:
+        - Key: seva:purpose
+          Value: on-call-rota
+        - Key: seva:environment
+          Value: !Ref Environment
+
+  AlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlarmTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref AlarmTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+          # §12.5's SMS row: the messaging stack's configuration set publishes delivery failures
+          # here, so End User Messaging needs the same permission.
+          # The moderation stack's EventBridge rule, which reports a change to Bedrock
+          # model-invocation logging — §17 leaves that question open and §11.4 is why it matters, so
+          # the rule exists to make the answer observable rather than to decide it.
+          - Sid: AllowEventBridgeRules
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref AlarmTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+          # §12.5's AWS Budgets row. Its own service principal, which review found missing: without
+          # this all four notifications — 50%, 80%, 100% and the forecast — fail silently, and §12.2
+          # accepts that a crash hands back a day of the SMS budget precisely *because* "§12.5's AWS
+          # Budgets alarm is the independent backstop". A backstop that cannot publish is not one.
+          - Sid: AllowBudgetNotifications
+            Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref AlarmTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+          # §12.5's SMS row previously had the configuration set publish delivery failures here.
+          # It no longer does — those records carry a phone number and now go to CloudWatch Logs in
+          # region (§9.8) — but End User Messaging keeps the permission, because the spend-limit and
+          # protect-configuration alarms §12.5 asks for are published by this principal.
+          - Sid: AllowEndUserMessagingEvents
+            Effect: Allow
+            Principal:
+              Service: sms-voice.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref AlarmTopic
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+  OnCallEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref OnCallEmail
+
+  OnCallSmsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: sms
+      Endpoint: !Ref OnCallPhone
+
+  # §12.5 row 1: "API and function errors | Log drain → S3 → scanner → CloudWatch | 5xx responses
+  # above 2% for 5 minutes."
+  #
+  # A ratio rather than a count, which is what "above 2%" means and what a metric-math alarm is
+  # for: a count alone would page on a quiet night at the same rate as on a busy afternoon.
+  ServerErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'seva-${Environment}-5xx-rate'
+      AlarmDescription: >-
+        Spec 12.5: 5xx responses above 2% for 5 minutes. Spec 17.1 records why a 5xx matters more
+        here than its count suggests - several defects this build found were retryable 500s on
+        paths the limiter never counted.
+      AlarmActions:
+        - !Ref AlarmTopic
+      OKActions:
+        - !Ref AlarmTopic
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 2
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      # INSUFFICIENT_DATA rather than notBreaching: until the scanner exists there is no data, and
+      # an alarm that read "OK" with nothing feeding it would be a false assurance.
+      TreatMissingData: missing
+      Metrics:
+        - Id: errors
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: !Ref MetricNamespace
+              MetricName: ServerErrorResponses
+              Dimensions:
+                - Name: Environment
+                  Value: !Ref Environment
+            Period: 300
+            Stat: Sum
+        - Id: requests
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: !Ref MetricNamespace
+              MetricName: Responses
+              Dimensions:
+                - Name: Environment
+                  Value: !Ref Environment
+            Period: 300
+            Stat: Sum
+        - Id: rate
+          ReturnData: true
+          Label: 5xx percent of all responses
+          # IF rather than a bare division, so a period with no requests is 0% and not a
+          # divide-by-zero that CloudWatch would treat as missing.
+          Expression: 'IF(requests > 0, 100 * errors / requests, 0)'
+
+  # §12.5 row 2: "Sign-in failures | Same pipeline | 5x the normal rate." The baseline is the
+  # scanner's own rolling anomaly band rather than a number this template could guess — §9.3 raises
+  # the production auth limits to 300 sign-ins per 5 minutes per IP because of CGNAT, so a fixed
+  # count would be wrong on launch day in one direction or the other.
+  SignInFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'seva-${Environment}-sign-in-failures'
+      AlarmDescription: >-
+        Spec 12.5: sign-in failures at 5x the normal rate. Watches the Auth pipeline rather than
+        the functions, which is the distinction spec 17 O32 drew when it added the row below.
+      AlarmActions:
+        - !Ref AlarmTopic
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      # Anomaly detection against the metric's own history, which is what "5x the normal rate"
+      # describes. **Five standard deviations, not five times the rate** — review corrected this, and the
+          # difference matters: on a low-variance metric the alarm fires far below §12.5's "5x the
+          # normal rate" and on a spiky one far above. Expressing the spec's ratio would need a
+          # trailing baseline, which is a change to §12.5's number rather than to this template, so
+          # it is recorded in §17.1 for the owner. The second argument is the deviation multiplier; the scanner publishes the raw count. The
+      # metric is declared only in `Metrics` below — CloudFormation refuses an alarm that gives it
+      # both ways round.
+      ComparisonOperator: GreaterThanUpperThreshold
+      ThresholdMetricId: ad1
+      Metrics:
+        - Id: m1
+          ReturnData: true
+          MetricStat:
+            Metric:
+              Namespace: !Ref MetricNamespace
+              MetricName: SignInFailures
+              Dimensions:
+                - Name: Environment
+                  Value: !Ref Environment
+            Period: 300
+            Stat: Sum
+        - Id: ad1
+          ReturnData: true
+          Expression: 'ANOMALY_DETECTION_BAND(m1, 5)'
+      TreatMissingData: missing
+
+  # §12.5 row 3, which §17's `O32` added: "Token verification failing | Same pipeline | 401s on the
+  # signed-in routes at 5x the normal rate (`O32`). Nothing else sees this: the row above watches
+  # 5xx, the row below watches the Auth pipeline rather than functions, and `/discover/health`
+  # verifies no token."
+  #
+  # §17's `O31` is why the rate matters rather than the count: a caller holding only the publishable
+  # key can mint 401s, and before `O31` each one cost two outbound JWKS round trips.
+  TokenVerificationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'seva-${Environment}-401-rate'
+      AlarmDescription: >-
+        Spec 12.5 and spec 17 O32: 401s on the signed-in routes at 5x the normal rate. The only
+        signal that sees a token-verification outage - 5xx misses it, the Auth pipeline alarm
+        watches a different stage, and /discover/health verifies no token.
+      AlarmActions:
+        - !Ref AlarmTopic
+      ComparisonOperator: GreaterThanUpperThreshold
+      ThresholdMetricId: ad1
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      TreatMissingData: missing
+      Metrics:
+        - Id: m1
+          ReturnData: true
+          MetricStat:
+            Metric:
+              Namespace: !Ref MetricNamespace
+              MetricName: UnauthenticatedResponses
+              Dimensions:
+                - Name: Environment
+                  Value: !Ref Environment
+            Period: 300
+            Stat: Sum
+        - Id: ad1
+          ReturnData: true
+          Expression: 'ANOMALY_DETECTION_BAND(m1, 5)'
+
+  # §12.5's SMS row: "80% of the daily SMS cap, or send errors above 5%". §17.1 records why the
+  # first half arrives as a log line — "the count has to travel out in the hook's own log line,
+  # because §9.4 leaves the counter unreachable from anywhere but the hook's one call" — so the
+  # scanner reads that line and publishes the ratio the hook already computed against its cap.
+  SmsCapAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'seva-${Environment}-sms-cap'
+      AlarmDescription: >-
+        Spec 12.5: 80% of the daily SMS cap. The percentage comes from the hook's own log line,
+        which carries the count beside the cap it was measured against (spec 17.1).
+      AlarmActions:
+        - !Ref AlarmTopic
+      Namespace: !Ref MetricNamespace
+      MetricName: SmsDailyCapPercent
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 80
+      TreatMissingData: missing
+
+  SmsErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'seva-${Environment}-sms-errors'
+      AlarmDescription: 'Spec 12.5: SMS send errors above 5%.'
+      AlarmActions:
+        - !Ref AlarmTopic
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 5
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: missing
+      Metrics:
+        - Id: failed
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: !Ref MetricNamespace
+              MetricName: SmsSendFailures
+              Dimensions:
+                - Name: Environment
+                  Value: !Ref Environment
+            Period: 300
+            Stat: Sum
+        - Id: attempted
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: !Ref MetricNamespace
+              MetricName: SmsSendAttempts
+              Dimensions:
+                - Name: Environment
+                  Value: !Ref Environment
+            Period: 300
+            Stat: Sum
+        - Id: rate
+          ReturnData: true
+          Label: SMS send failures as a percent of attempts
+          Expression: 'IF(attempted > 0, 100 * failed / attempted, 0)'
+
+  # §12.5's last row and §15's controls: "Spend | AWS Budgets; Supabase usage emails and spend cap
+  # | 80% of the monthly budget", and §15's "set AWS Budgets alerts at 50%, 80% and 100%".
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub 'seva-${Environment}-monthly'
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref AlarmTopic
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref AlarmTopic
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref AlarmTopic
+        # §12.2 accepts that a crash hands back a day of the SMS budget, with §12.5's Budgets alarm
+        # named as "the independent backstop". A forecast alarm is what makes it a backstop rather
+        # than a post-mortem.
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref AlarmTopic
+
+Outputs:
+  AlarmTopicArn:
+    Description: >-
+      Pass to the messaging stack as AlarmTopicArn, and subscribe the on-call rota's other channels
+      to it by hand if the rota changes (spec 12.5).
+    Value: !Ref AlarmTopic
+  MetricNamespace:
+    Description: >-
+      The namespace the log scanner must publish into. The metric names these alarms watch are
+      Responses, ServerErrorResponses, UnauthenticatedResponses, SignInFailures,
+      SmsDailyCapPercent, SmsSendAttempts and SmsSendFailures, each with an Environment dimension.
+    Value: !Ref MetricNamespace
+  NotBuilt:
+    Description: >-
+      D12's log scanner is not built: spec 3.1 lists "One small log-scanning function" among what
+      SEVA writes, and its runtime is a spec 3.3 dependency decision nobody has made. Until it
+      exists every alarm here is INSUFFICIENT_DATA, which TreatMissingData deliberately does not
+      hide.
+    Value: log-scanner
