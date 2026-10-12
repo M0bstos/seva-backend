@@ -413,6 +413,22 @@ AWS_REGION = "env(AWS_REGION)"
 SEVA_GUARDRAIL_ID = "env(SEVA_GUARDRAIL_ID)"
 SEVA_GUARDRAIL_VERSION = "env(SEVA_GUARDRAIL_VERSION)"
 
+# **The Send SMS hook's four settings, which were missing — measured 6 October 2026: without
+# them the hook does not boot at all on a local stack, answering WORKER_ERROR with
+# `SEVA_SMS_ORIGINATION_IDENTITY is not set`.** The same shape as the salt above: the secrets
+# were always needed and what was absent was the wiring. §9.3 and D16 put cancellations and
+# sign-in codes on one DLT-registered route, so the message worker shares the first three and
+# has a template of its own (§14.2 asks for both templates).
+SEVA_SMS_ORIGINATION_IDENTITY = "env(SEVA_SMS_ORIGINATION_IDENTITY)"
+SEVA_SMS_CONFIGURATION_SET = "env(SEVA_SMS_CONFIGURATION_SET)"
+SEVA_SMS_DLT_ENTITY_ID = "env(SEVA_SMS_DLT_ENTITY_ID)"
+SEVA_SMS_TEMPLATE_ID_OTP = "env(SEVA_SMS_TEMPLATE_ID_OTP)"
+SEVA_SMS_TEMPLATE_ID_CANCELLATION = "env(SEVA_SMS_TEMPLATE_ID_CANCELLATION)"
+
+# §9.3: app email goes out "from a SEVA domain with SPF, DKIM and DMARC", and §9.5's AWS key
+# allows `ses:SendEmail` from it.
+SEVA_EMAIL_FROM = "env(SEVA_EMAIL_FROM)"
+
 # §7.3 sets verify_jwt per function: `acts`, `activities`, `uploads`, `reports`,
 # `account` and `feed` are true, `discover`, `sms-hook` and the three workers false.
 # A function that sets it true still calls getClaims(), because the platform check
@@ -431,6 +447,21 @@ import_map = "./functions/acts/deno.json"
 enabled = true
 verify_jwt = true
 import_map = "./functions/activities/deno.json"
+
+[functions.uploads]
+enabled = true
+verify_jwt = true
+import_map = "./functions/uploads/deno.json"
+
+[functions.reports]
+enabled = true
+verify_jwt = true
+import_map = "./functions/reports/deno.json"
+
+[functions.account]
+enabled = true
+verify_jwt = true
+import_map = "./functions/account/deno.json"
 
 # False because this function serves logged-out callers (§7.3). A token that is sent
 # is still verified in code, and one that does not verify is answered UNAUTHENTICATED
@@ -460,6 +491,16 @@ import_map = "./functions/sms-hook/deno.json"
 enabled = true
 verify_jwt = false
 import_map = "./functions/moderation-worker/deno.json"
+
+[functions.message-worker]
+enabled = true
+verify_jwt = false
+import_map = "./functions/message-worker/deno.json"
+
+[functions.ops-worker]
+enabled = true
+verify_jwt = false
+import_map = "./functions/ops-worker/deno.json"
 
 [analytics]
 enabled = true
