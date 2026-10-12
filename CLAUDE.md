@@ -121,6 +121,12 @@ The agent that writes the code is never the agent that approves it. Three read-o
 
 Three skills in `.claude/skills/` carry the procedures: `migration` for a table migration, `route` for an Edge Function route group, `clean-check` for a full sweep. Use them rather than reinventing the steps.
 
+A fourth agent, **`seam-qa`**, is not a pre-commit reviewer. It hunts the defects no feature test can
+see — work that outlives its subject, a capability used after the state that granted it changed, a
+clock that disagrees with a cascade — reproduces them against a live stack, and ends with a
+paste-ready prompt for fixing them. Run it when a phase is otherwise finished, not on a diff: it
+needs the whole system in place to find the interleavings between its parts.
+
 ## Git
 
 - One-line commit messages, lowercase, imperative, 72 characters at most, e.g. `add join_activity capacity lock`.
