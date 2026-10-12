@@ -19,7 +19,7 @@
 // keeping — but it has to be a deliberate, reverted change, not a surprise in the results.
 import http from "k6/http";
 import { check } from "k6";
-import { Trend, Rate } from "k6/metrics";
+import { Rate, Trend } from "k6/metrics";
 
 const cached = new Trend("discover_cached", true);
 const uncached = new Trend("discover_uncached", true);
