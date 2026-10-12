@@ -1,13 +1,15 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(11);
+select plan(13);
 
 insert into auth.users (id) values
   ('11111111-1111-1111-1111-111111111111'),
-  ('22222222-2222-2222-2222-222222222222');
+  ('22222222-2222-2222-2222-222222222222'),
+  ('33333333-3333-3333-3333-333333333333');
 insert into profiles (id, display_name) values
   ('11111111-1111-1111-1111-111111111111', 'anand'),
-  ('22222222-2222-2222-2222-222222222222', 'bina');
+  ('22222222-2222-2222-2222-222222222222', 'bina'),
+  ('33333333-3333-3333-3333-333333333333', 'chandra');
 insert into acts (id, author_id, title, story, category, occurred_on, location_coarse,
                   status, idempotency_key, request_hash)
 values
@@ -24,6 +26,12 @@ values
 insert into act_metrics (act_id, metric, value) values
   ('bbbb0000-0000-0000-0000-000000000001', 'waste_kg', 48.50),
   ('bbbb0000-0000-0000-0000-000000000002', 'trees_planted', 20);
+
+-- Chandra blocks Bina, so `acts_select` hides Bina's visible Act from Chandra. `O19`'s widening has
+-- to carry that across to the metrics, or the embed would survive the block that hid the Act.
+-- A third person rather than Anand, so the assertions written against Anand's view keep theirs.
+insert into blocks (blocker_id, blocked_id) values
+  ('33333333-3333-3333-3333-333333333333', '22222222-2222-2222-2222-222222222222');
 
 select is_empty(
   $$ select a.attname from pg_attribute a
@@ -88,6 +96,32 @@ select results_eq(
   $$ values ('volunteer_hours'::text), ('waste_kg'::text) $$,
   'metrics are readable for a visible act and hidden for one still in screening'
 );
+
+-- §17 `O19`, decided 12 October 2026: §7.2's "plus your own" governs the embed as well as the Act,
+-- so an author reads the metrics of their own Act in any status. Before this they could read the
+-- Act and get an empty metrics array on it.
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"22222222-2222-2222-2222-222222222222"}';
+select is(
+  (select count(*)::int from act_metrics
+   where act_id = 'bbbb0000-0000-0000-0000-000000000002'),
+  1,
+  'an author reads the metrics of their own pending Act (§7.2, O19)'
+);
+
+-- And the property the policy now gets for free rather than by restating it: a blocked author's
+-- metrics are no more readable than their Act. This is enforced by `acts_select`, because a table
+-- referenced inside an RLS `using` expression is itself subject to its own RLS — so the assertion
+-- pins the behaviour a client sees, not a clause in this policy. Mutation testing is what showed
+-- the restated clause was dead code (§17.1, 12 October 2026).
+set local request.jwt.claims = '{"sub":"33333333-3333-3333-3333-333333333333"}';
+select is(
+  (select count(*)::int from act_metrics
+   where act_id = 'bbbb0000-0000-0000-0000-000000000001'),
+  0,
+  'and a blocked author''s metrics stay hidden, matching acts_select (§7.2, §5.2)'
+);
+reset role;
 
 reset role;
 set local role service_role;
