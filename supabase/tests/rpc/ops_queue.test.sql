@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(36);
+select plan(39);
 
 insert into auth.users (id, created_at) values
   ('11111111-1111-1111-1111-111111111111', now() - interval '30 days'),
@@ -129,9 +129,16 @@ select is(
 -- archived in silence, which is the one failure mode §8.4 and §12.5 are written about — so each
 -- one is claimed here rather than trusted to the list being right.
 select pgmq.send('ops', jsonb_build_object('kind', 'quarantine_file', 'path', 'gone/two'));
+-- With a real `account_exports` row behind it. The id used to be `gen_random_uuid()`, and this
+-- assertion passed only because the claim did not check that the subject existed — §8.4 binds a
+-- verdict to what it is about, and a job for an export that was never requested is not work.
+reset role;
+insert into account_exports (id, user_id, status)
+values ('eeee1111-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'pending');
+set local role service_role;
 select pgmq.send('ops', jsonb_build_object(
   'kind', 'export_account', 'user_id', '11111111-1111-1111-1111-111111111111',
-  'export_id', gen_random_uuid()));
+  'export_id', 'eeee1111-0000-0000-0000-000000000001'));
 select pgmq.send('ops', jsonb_build_object(
   'kind', 'delete_retained_files', 'preserved_id', gen_random_uuid(),
   'paths', to_jsonb(array['gone/three'])));
@@ -339,6 +346,34 @@ select is(
   (select count(*)::int from pgmq.a_ops where message ->> 'user_id' = 'also-not-a-uuid'),
   1,
   'so §8.4''s "nothing is silently dropped" holds for a message nothing can identify'
+);
+
+-- The defect the `seam-qa` agent found: an `export_account` job whose row the erasure cascade has
+-- already removed. Two ordinary calls in one order — delete then export — reach it, and before the
+-- fix the job went out, the worker wrote an object for an account that no longer existed, and §8.4
+-- burned five retries and archived with an alarm for work that should have been dropped.
+select pgmq.send('ops', jsonb_build_object(
+  'kind', 'export_account', 'user_id', '11111111-1111-1111-1111-111111111111',
+  'export_id', 'eeee1111-0000-0000-0000-000000000002'));
+
+select is(
+  jsonb_array_length(claim_ops_jobs(10)),
+  0,
+  'an export job whose row is gone is not handed out (§8.4)'
+);
+
+select is(
+  (select count(*)::int from pgmq.q_ops
+   where message ->> 'export_id' = 'eeee1111-0000-0000-0000-000000000002'),
+  0,
+  'and it is deleted rather than archived: §8.4 archives work that failed, not work that is gone'
+);
+
+select is(
+  (select count(*)::int from pgmq.a_ops
+   where message ->> 'export_id' = 'eeee1111-0000-0000-0000-000000000002'),
+  0,
+  'so §12.5''s dead-job arm is not woken by an account that asked to be erased'
 );
 
 -- A photo staff took back between the approval and the worker: §17.1's clobber, in this path.
