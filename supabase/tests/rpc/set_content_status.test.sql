@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(47);
+select plan(53);
 
 insert into auth.users (id, created_at) values
   ('11111111-1111-1111-1111-111111111111', now() - interval '30 days'),
@@ -449,6 +449,83 @@ select is(
   'processing',
   'approving a photo is logged as the processing it actually became (§8.3, §10.3)'
 );
+
+-- The defect the `seam-qa` agent found on 13 October 2026, reproduced here. §8.1: "**A held photo
+-- gets no published copy**." Holding a photo that was *already* published left `public_path` set and
+-- queued no file move, so the public bucket went on serving it — and an erasure then gave that live
+-- path a 180-day retention clock, which `queue_media_deletion` honoured by suppressing the deletion.
+--
+-- With its own fixtures, because the tests above have already moved this file's original photos
+-- through takedowns and `removed` is terminal. Every held fixture in this file *starts* held, which
+-- is why three rounds of review never produced a held photo that had been published.
+set local role postgres;
+insert into acts (id, author_id, title, story, category, occurred_on, location_coarse,
+                  status, text_checked, idempotency_key, request_hash)
+values ('bbbb5555-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111',
+        'Published then held',
+        'An Act whose photo was published and then held, which is the case that had no fixture.',
+        'environment', '2026-10-11',
+        extensions.st_setsrid(extensions.st_makepoint(73.85, 18.52), 4326)::extensions.geography,
+        'visible', true, '00000000-0000-0000-0000-0000000055a1', repeat('5', 64));
+insert into media (id, owner_id, purpose, act_id, upload_path, public_path, status) values
+  ('dddd5555-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111',
+   'act', 'bbbb5555-0000-0000-0000-000000000001',
+   '11111111-1111-1111-1111-111111111111/five',
+   '11111111-1111-1111-1111-111111111111/five', 'ready'),
+  ('dddd5555-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111',
+   'avatar', null,
+   '11111111-1111-1111-1111-111111111111/six',
+   '11111111-1111-1111-1111-111111111111/six', 'ready');
+update profiles set avatar_path = '11111111-1111-1111-1111-111111111111/six'
+where id = '11111111-1111-1111-1111-111111111111';
+select is(
+  set_content_status('staff', '99999999-9999-9999-9999-999999999999',
+    null, null, 'dddd5555-0000-0000-0000-000000000001', 'held',
+    'held after publication, which is the case that had no test') ->> 'status',
+  'held',
+  'a published photo can be held (§8.3 visible -> held)'
+);
+
+select ok(
+  (select public_path is null and thumb_path is null and status = 'held'
+   from media where id = 'dddd5555-0000-0000-0000-000000000001'),
+  'and the hold clears its published path, because §8.1 gives a held photo no published copy'
+);
+
+select is(
+  (select count(*)::int from pgmq.q_ops
+   where message ->> 'kind' = 'unpublish_file'
+     and message ->> 'path' = '11111111-1111-1111-1111-111111111111/five'),
+  1,
+  'with a job to take the file out of the public bucket (§5.4 keeps file moves out of SQL)'
+);
+
+-- Back to `uploads`, not `quarantine`: §11.6 attaches the quarantine move to a removal and its
+-- 180-day clock, and a hold is reviewable. The destination lives in the worker, so what is asserted
+-- here is that this is *not* the removal's job kind.
+select is_empty(
+  $$ select 1 from pgmq.q_ops
+     where message ->> 'kind' = 'quarantine_file'
+       and message ->> 'path' = '11111111-1111-1111-1111-111111111111/five' $$,
+  'and not the quarantine move, which §11.6 reserves for a takedown'
+);
+
+-- The avatar half, which the removal branch has always done and the hold branch did not: a held
+-- avatar kept rendering on the profile. `dddd0000-…-0003` is this person's published avatar.
+select is(
+  set_content_status('staff', '99999999-9999-9999-9999-999999999999',
+    null, null, 'dddd5555-0000-0000-0000-000000000002', 'held',
+    'holding a published avatar') ->> 'status',
+  'held',
+  'a published avatar can be held too'
+);
+
+select ok(
+  (select avatar_path is null from profiles
+   where id = '11111111-1111-1111-1111-111111111111'),
+  'and the profile stops pointing at it, so a held avatar stops rendering (§9.2)'
+);
+reset role;
 
 select * from finish();
 rollback;
