@@ -38,7 +38,8 @@ type Job = {
     | "export_account"
     | "delete_account"
     | "delete_retained_files"
-    | "delete_export_file";
+    | "delete_export_file"
+    | "unpublish_file";
   upload_path?: string;
   public_path?: string;
   thumb_path?: string;
@@ -122,6 +123,28 @@ async function run(job: Job) {
       if (!isPath(exportPath)) throw new Error("an export deletion with no path");
       const gone = await db.storage.from(BUCKETS.exports).remove([exportPath]);
       if (gone.error) throw new Error("the expired export could not be deleted");
+      await completeJob(job);
+      return;
+    }
+
+    case "unpublish_file": {
+      // §8.1: "A held photo gets no published copy." A photo held *after* it was published has to
+      // leave the public `media` bucket, and the file goes back to the private `uploads` bucket
+      // rather than to `quarantine` — §11.6 attaches quarantine to a removal and its 180-day clock,
+      // while a hold is reviewable and §8.1 puts a held photo's original in `uploads`. That also
+      // means §8.3's `held → visible` republishes from `uploads` with no special case.
+      //
+      // Measured on the sibling path: `move` errors `NoSuchKey` on an object that is not there,
+      // which a retry of an already-moved file hits — so a missing source is success rather than a
+      // failure that would retry five times and archive.
+      const published = job.path;
+      if (!isPath(published)) throw new Error("an unpublish job with no path");
+      const returned = await db.storage
+        .from(BUCKETS.media)
+        .move(published, published, { destinationBucket: BUCKETS.uploads });
+      if (returned.error && !(await missing(BUCKETS.media, published))) {
+        throw new Error("the published copy could not be unpublished");
+      }
       await completeJob(job);
       return;
     }

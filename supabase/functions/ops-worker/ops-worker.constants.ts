@@ -31,9 +31,13 @@ export const DELETE_FROM = [BUCKETS.uploads, BUCKETS.media, BUCKETS.quarantine] 
 // describing a state the system cannot reach, while the one bucket the bytes are actually in was
 // missing, and §8.3's `held → visible` row could not complete for any photo published once.
 //
-// `media` last, because finding it there means the published copy already exists and the copy is a
-// no-op upsert — and because `publish()` deletes the original only when it came from `uploads`,
-// which is what stops it deleting the very copy it just confirmed.
+// `media` last, and it is a fallback rather than the ordinary route. Since 13 October 2026 a hold
+// moves a published copy back to `uploads`, so the common case for a photo held after publication
+// is the first entry — but that move is an `ops` job, so between the hold and the worker, or if the
+// move failed, the bytes are still in `media` and a republication must not come back empty. Finding
+// it there means the published copy already exists and the copy is a no-op upsert, and `publish()`
+// deletes the original only when it came from `uploads`, which is what stops it deleting the very
+// copy it just confirmed.
 export const PUBLISH_FROM = [BUCKETS.uploads, BUCKETS.media] as const;
 
 // §17 `O22`, decided during the build: the published copy is served unauthenticated from a public
