@@ -427,6 +427,51 @@ assertEquals(
 );
 pass("removing it clears the profile, stops the serving, keeps the record (§11.6)");
 
+heading("a published photo, held (§8.1, §8.3) — the case that had no test");
+// §8.1: "A held photo gets no published copy." Holding a photo that was *already* published used to
+// leave it being served, and an erasure then pinned that live public path for 180 days with the
+// retention row that was supposed to protect it. Found by the seam-qa agent, 13 October 2026.
+const second = await uploadPhoto(author.token, "act");
+await approveByHand({ media: second }, admin.token);
+await runWorker("ops-worker");
+const secondPath = await sql(`select public_path from media where id='${second}'`);
+assert(secondPath.length > 0);
+assertEquals((await fetch(`${API}/storage/v1/object/public/media/${secondPath}`)).status, 200);
+pass("a second photo is published and served", "so there is something to hold");
+
+const heldAgain = await adminRpc("admin_set_content_status", {
+  p_act_id: null,
+  p_activity_id: null,
+  p_media_id: second,
+  p_status: "held",
+  p_reason: "holding a photo that was already published",
+}, admin.token);
+assertEquals(heldAgain.status, "held");
+assertEquals(await sql(`select public_path is null from media where id='${second}'`), "t");
+await runWorker("ops-worker");
+assert(
+  (await fetch(`${API}/storage/v1/object/public/media/${secondPath}`)).status >= 400,
+  "§8.1: a held photo gets no published copy, so the public bucket must stop serving it",
+);
+pass("holding it takes the file out of the public bucket (§8.1, §8.3)");
+
+// And it can be published again, which is what sending the file to `uploads` rather than to
+// `quarantine` buys: §8.3's held → visible has somewhere to republish from.
+await adminRpc("admin_set_content_status", {
+  p_act_id: null,
+  p_activity_id: null,
+  p_media_id: second,
+  p_status: "visible",
+  p_reason: "reviewed again and approved",
+}, admin.token);
+await runWorker("ops-worker");
+assertEquals(await sql(`select status from media where id='${second}'`), "ready");
+assertEquals((await fetch(`${API}/storage/v1/object/public/media/${secondPath}`)).status, 200);
+pass(
+  "and approving it again republishes it",
+  "which is why the file goes to uploads, not quarantine",
+);
+
 heading("editing a profile, and the columns §9.2 refuses");
 const edit = await fetch(`${API}/rest/v1/profiles?id=eq.${author.id}`, {
   method: "PATCH",
