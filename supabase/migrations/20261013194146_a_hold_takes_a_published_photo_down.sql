@@ -335,6 +335,11 @@ $$;
 -- The allowlist, so the job the branch above sends is handed to a worker rather than archived in
 -- silence. A roll-forward of `claim_ops_jobs` on top of the one that bound the export claim to a
 -- live row; everything else in it is unchanged.
+--
+-- **Nine kinds reach it now.** The original header said "eight" and listed six, which the `seam-qa`
+-- agent flagged: the two retention kinds were added later and documented beside the list instead of
+-- in it. The list below is the authority — a count in a comment is one more thing to go stale, so
+-- this one says what the list is for rather than how long it is.
 
 create or replace function claim_ops_jobs(p_count int) returns jsonb
 language plpgsql
