@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(53);
+select plan(60);
 
 insert into auth.users (id, created_at) values
   ('11111111-1111-1111-1111-111111111111', now() - interval '30 days'),
@@ -524,6 +524,95 @@ select ok(
   (select avatar_path is null from profiles
    where id = '11111111-1111-1111-1111-111111111111'),
   'and the profile stops pointing at it, so a held avatar stops rendering (§9.2)'
+);
+reset role;
+
+-- The collapse the `seam-qa` agent found on 15 October 2026, reproduced here. §17.1 recorded the
+-- `media_status` mapping as leaving "a never-screened or malformed photo … removable by staff but
+-- not approvable, which is the right way round". It was not: `uploading`, `processing` and
+-- `rejected` all read as `pending`, §8.3 allows `pending -> held`, and §8.3 allows `held ->
+-- visible` — so two ordinary moderator calls walked a photo whose bytes §8.1 had deleted into
+-- `processing` with an `ops` job to copy it into the public `media` bucket.
+--
+-- With its own fixtures: every media fixture above is `ready` or `held`, which is why no round of
+-- review produced a photo in either of the two states §8.1 leaves without a file.
+set local role postgres;
+insert into media (id, owner_id, purpose, upload_path, status) values
+  ('dddd7777-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111',
+   'avatar', '11111111-1111-1111-1111-111111111111/seven', 'rejected'),
+  ('dddd7777-0000-0000-0000-000000000002', '11111111-1111-1111-1111-111111111111',
+   'avatar', '11111111-1111-1111-1111-111111111111/eight', 'uploading'),
+  ('dddd7777-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111',
+   'avatar', '11111111-1111-1111-1111-111111111111/nine', 'processing');
+
+-- The hold is where it has to be refused: once the row says `held` it no longer says what it was
+-- held from, which is the collapse itself.
+select is(
+  set_content_status('staff', '99999999-9999-9999-9999-999999999999',
+    null, null, 'dddd7777-0000-0000-0000-000000000001', 'held',
+    'holding a photo whose bytes failed'),
+  jsonb_build_object('error', 'VALIDATION_FAILED', 'field', 'status'),
+  'a rejected photo cannot be held: §8.1 deleted its original, so there is nothing to review'
+);
+
+-- The whole object rather than one key: §7.4 fixes the code as well as the field, and an
+-- assertion on `field` alone would pass if a later change answered `FORBIDDEN` instead.
+select is(
+  set_content_status('staff', '99999999-9999-9999-9999-999999999999',
+    null, null, 'dddd7777-0000-0000-0000-000000000002', 'held',
+    'holding a photo that never completed'),
+  jsonb_build_object('error', 'VALIDATION_FAILED', 'field', 'status'),
+  'nor an uploading one, whose object no complete call has confirmed (§8.1)'
+);
+
+-- The walk, not just the first step: with no `held` to approve from, the second call has nothing to
+-- reach, and the public bucket gets no job either way.
+select ok(
+  (select count(*)::int from media
+   where id in ('dddd7777-0000-0000-0000-000000000001',
+                'dddd7777-0000-0000-0000-000000000002')
+     and status in ('rejected', 'uploading')) = 2
+  and (select count(*)::int from pgmq.q_ops
+       where message ->> 'kind' = 'publish_photo'
+         and message ->> 'media_id' in ('dddd7777-0000-0000-0000-000000000001',
+                                        'dddd7777-0000-0000-0000-000000000002')) = 0,
+  'both rows stay where screening left them, and no bytes are queued for the public bucket (§8)'
+);
+
+-- §11.6's court-order clock "does not care whether a file was ever screened", so the one verb that
+-- still works from these two states is removal.
+select is(
+  set_content_status('staff', '99999999-9999-9999-9999-999999999999',
+    null, null, 'dddd7777-0000-0000-0000-000000000001', 'removed',
+    'court order 52 of 2026') ->> 'status',
+  'removed',
+  'but staff still remove it, which §11.6 puts a 3-hour clock on whatever screening did (§8.3)'
+);
+
+select is(
+  set_content_status('staff', '99999999-9999-9999-9999-999999999999',
+    null, null, 'dddd7777-0000-0000-0000-000000000002', 'removed',
+    'court order 53 of 2026') ->> 'status',
+  'removed',
+  'and from an uploading one, which has no public_path for the quarantine loop to find'
+);
+
+select is(
+  (select source_kind from private.preserved_content
+   where source_id = 'dddd7777-0000-0000-0000-000000000002'),
+  'media',
+  'with §11.6''s snapshot written even though the object may never have existed'
+);
+
+-- `processing` is deliberately not in the guard. Its object exists and §8.1 has handed it to the
+-- worker, so whether a moderator may approve one is `O54`'s question for the owner — and the
+-- no-AWS lifecycle §17.1 measured on 12 October runs through exactly this state.
+select is(
+  set_content_status('staff', '99999999-9999-9999-9999-999999999999',
+    null, null, 'dddd7777-0000-0000-0000-000000000003', 'held',
+    'a report arrived while it was being screened') ->> 'status',
+  'held',
+  'a photo still in screening can be held, which this guard leaves alone (`O54`)'
 );
 reset role;
 
