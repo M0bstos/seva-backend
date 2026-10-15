@@ -49,11 +49,18 @@ writes:
       **`p_until` carries all three cases** (§17.1): a future timestamp suspends until then, `null`
       suspends indefinitely and needs an admin, and a timestamp at or before now **lifts** the
       suspension — which §10.2 lists no function for and which something has to do, or a seven-day
-      suspension would never end. Lifting an indefinite one also needs an admin, for §8.2's reason
-      about one boolean: a moderator who could undo an admin's decision would make the distinction
-      §10.1 draws meaningless.
+      suspension would never end. **Undoing a suspension a moderator could not have imposed also
+      needs an admin**, for §8.2's reason about one boolean: a moderator who could undo an admin's
+      decision would make the distinction §10.1 draws meaningless.
       A moderator who picks a date more than 7 days out gets `FORBIDDEN`, so the date picker is
       capped at 7 days when the signed-in staff member is not an admin.
+      **Amended 15 October 2026: the ceiling reads the suspension already on the account as well as
+      the date picked, so a moderator gets `FORBIDDEN` on a person with more than seven days still
+      to run whatever date they pick — lifting and shortening included.** A capped picker cannot
+      explain that one, so the screen disables the control and says who may act instead: show it
+      when `selectedPerson.status` is `suspended` and `selectedPerson.suspended_until` is null or
+      more than 7 days away, and the signed-in staff member is not an admin. Both columns are in
+      `findPeople.select` already.
       The sign-out is queued, not immediate: §12.4 notes an access token lasts an hour and nothing in
       Auth reads `profiles.status`, so the operations worker revokes the sessions on its next run.
 
