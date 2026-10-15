@@ -465,6 +465,24 @@ so do not build an interface that offers them.
 
 Editing `display_name` or `bio` sends the profile text back for screening.
 
+**When a profile's `text_hidden` is true, show “SEVA member” instead of `display_name`, and show no
+bio. That substitution is the client's job — nothing in the backend does it for you.** Screening
+flags a display name or bio by setting this one boolean; it never rewrites the text, because the
+staff review screens have to show what was actually written. So `GET /rest/v1/profiles` returns the
+real `display_name` and `bio` with the flag beside them, and every screen that renders another
+member's name or bio — lists, an Activity's organiser, an Act's author, a participant roster — has
+to read the flag and mask. No endpoint will refuse a client that skips it, and a client that skips
+it publishes text that was held back for review.
+
+`text_hidden` is read-only to clients, like the other moderation columns. Editing the display name
+or bio does not clear it — that is deliberate, or an author could lift a hide by editing until
+something benign passed — so a profile stays masked until staff act.
+
+One case is deliberately unsettled: whether the **author's own** profile screen shows them their
+real text or the mask. The rule does not distinguish a reader from the owner. Mask it until the
+programme says otherwise, and give the author some way to see that their text is under review —
+without that they will edit it repeatedly and nothing will visibly change.
+
 ---
 
 ## 7. Things worth knowing before you build a screen
