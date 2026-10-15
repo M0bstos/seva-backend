@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(26);
+select plan(36);
 
 insert into auth.users (id) values
   ('99999999-9999-9999-9999-999999999999'),
@@ -8,7 +8,10 @@ insert into auth.users (id) values
   ('88888888-8888-8888-8888-888888888888'),
   ('11111111-1111-1111-1111-111111111111'),
   ('22222222-2222-2222-2222-222222222222'),
-  ('33333333-3333-3333-3333-333333333333');
+  ('33333333-3333-3333-3333-333333333333'),
+  -- Two accounts either side of §10.2's seven days, for the ceiling and the decay below.
+  ('44444444-4444-4444-4444-444444444444'),
+  ('55555555-5555-5555-5555-555555555555');
 insert into profiles (id, display_name) values
   ('99999999-9999-9999-9999-999999999999', 'moderator'),
   -- A second moderator, so the lateral case has a target.
@@ -16,7 +19,9 @@ insert into profiles (id, display_name) values
   ('88888888-8888-8888-8888-888888888888', 'admin'),
   ('11111111-1111-1111-1111-111111111111', 'first person'),
   ('22222222-2222-2222-2222-222222222222', 'second person'),
-  ('33333333-3333-3333-3333-333333333333', 'third person');
+  ('33333333-3333-3333-3333-333333333333', 'third person'),
+  ('44444444-4444-4444-4444-444444444444', 'fourth person'),
+  ('55555555-5555-5555-5555-555555555555', 'fifth person');
 insert into staff (user_id, role) values
   ('99999999-9999-9999-9999-999999999999', 'moderator'),
   ('77777777-7777-7777-7777-777777777777', 'moderator'),
@@ -251,6 +256,120 @@ select is(
     'appeal upheld by the programme') ->> 'status',
   'active',
   'and an admin lifts the indefinite one (§10.1)'
+);
+
+-- The second bypass around the same precondition, reproduced by the `seam-qa` agent on
+-- 15 October 2026. The branch above read `suspended_until` for *null*, so an admin's **bounded**
+-- suspension of a year was unprotected — a year out is not null — and a moderator who is refused
+-- `now() + 365 days` when imposing it (asserted above) could undo the same ban in **one** call.
+-- Both halves are reproduced here, because they take different routes through the function: a lift
+-- skips the seven-day ceiling check entirely, and a shortening passes it.
+--
+-- `11111111-…` is used as a target here for the first time; every earlier assertion used it as an
+-- actor, which is why no fixture in this file had ever been given a suspension longer than seven
+-- days to undo.
+select is(
+  admin_suspend_user('11111111-1111-1111-1111-111111111111', now() + interval '365 days',
+    'sustained coordinated abuse, reviewed by the programme') ->> 'status',
+  'suspended',
+  'an admin suspends for a year, which is inside §10.1''s "Admin | any"'
+);
+
+set local request.jwt.claims = '{"sub":"99999999-9999-9999-9999-999999999999","aal":"aal2"}';
+select is(
+  admin_suspend_user('11111111-1111-1111-1111-111111111111', now() - interval '1 second',
+    'reinstating them') ->> 'error',
+  'FORBIDDEN',
+  'a moderator cannot lift a year-long ban they could not have imposed (§10.1, §10.2)'
+);
+
+select is(
+  admin_suspend_user('11111111-1111-1111-1111-111111111111', now() + interval '1 minute',
+    'a minute is plenty') ->> 'error',
+  'FORBIDDEN',
+  'nor shorten it to a minute, which the seven-day ceiling lets through (§10.2)'
+);
+
+-- The date and not only the status: a shortening leaves the account `suspended`, so asserting the
+-- status alone would pass with the defect in place.
+reset role;
+select ok(
+  (select status = 'suspended' and suspended_until > now() + interval '300 days'
+   from profiles where id = '11111111-1111-1111-1111-111111111111'),
+  'and neither refusal moved the end date the admin set'
+);
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"88888888-8888-8888-8888-888888888888","aal":"aal2"}';
+select is(
+  admin_suspend_user('11111111-1111-1111-1111-111111111111', now(),
+    'the year was reduced on appeal') ->> 'status',
+  'active',
+  'while the admin who imposed it lifts it, which is where §10.1 puts the decision'
+);
+
+-- Row 1618: an assertion on a function's own return value proves only that the call was allowed,
+-- because `status` here is computed from the argument handed back. The table is what proves it.
+reset role;
+select ok(
+  (select status = 'active' and suspended_until is null
+   from profiles where id = '11111111-1111-1111-1111-111111111111'),
+  'and the row goes back, both columns together, not just the answer (§5.2.1)'
+);
+
+-- §10.2's "Moderator ≤ 7 days" is the spec-grounded half of the rule above, and nothing measured
+-- it: the 365-day fixture passes with the constant mutated anywhere up to 364 days. These two sit
+-- one either side of the ceiling, so the boundary itself is asserted rather than implied.
+--
+-- `44444444-…` is suspended for *exactly* eight days. `now()` is one value for the whole
+-- transaction, so `suspended_until > now() + interval '7 days'` is true by two days and false the
+-- moment the constant is widened to eight.
+--
+-- `55555555-…` is the **decay** case, which is the consequence of reading time remaining rather
+-- than who imposed it: an admin's year-long ban, run down to six days, is a suspension a moderator
+-- could have imposed and so becomes theirs to lift. The run-down is done on the row because the
+-- guard cannot be asked about a date it cannot see. `O53` asks the owner to ratify this.
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"88888888-8888-8888-8888-888888888888","aal":"aal2"}';
+select admin_suspend_user('44444444-4444-4444-4444-444444444444', now() + interval '8 days',
+  'eight days, which only an admin may impose');
+select admin_suspend_user('55555555-5555-5555-5555-555555555555', now() + interval '365 days',
+  'a year, which only an admin may impose');
+
+reset role;
+update profiles set suspended_until = now() + interval '6 days'
+where id = '55555555-5555-5555-5555-555555555555';
+select ok(
+  (select count(*)::int from profiles
+   where id in ('44444444-4444-4444-4444-444444444444',
+                '55555555-5555-5555-5555-555555555555')
+     and status = 'suspended') = 2,
+  'both ceiling fixtures are suspended, one either side of §10.2''s seven days'
+);
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"99999999-9999-9999-9999-999999999999","aal":"aal2"}';
+select is(
+  admin_suspend_user('44444444-4444-4444-4444-444444444444', now() - interval '1 second',
+    'reinstating them') ->> 'error',
+  'FORBIDDEN',
+  'eight days still to run is out of a moderator''s reach, which pins the ceiling at seven (§10.2)'
+);
+
+select is(
+  admin_suspend_user('55555555-5555-5555-5555-555555555555', now() - interval '1 second',
+    'reinstating them, six days early') ->> 'status',
+  'active',
+  'six days is within it, so a long ban decays into a moderator''s reach as it runs down (`O53`)'
+);
+
+reset role;
+select ok(
+  (select status = 'suspended' and suspended_until > now() + interval '7 days'
+   from profiles where id = '44444444-4444-4444-4444-444444444444')
+  and (select status = 'active' and suspended_until is null
+   from profiles where id = '55555555-5555-5555-5555-555555555555'),
+  'and both rows say so, the refusal untouched and the lift complete (§5.2.1)'
 );
 
 reset role;
