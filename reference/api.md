@@ -469,10 +469,11 @@ Editing `display_name` or `bio` sends the profile text back for screening.
 bio. That substitution is the client's job — nothing in the backend does it for you.** Screening
 flags a display name or bio by setting this one boolean; it never rewrites the text, because the
 staff review screens have to show what was actually written. So `GET /rest/v1/profiles` returns the
-real `display_name` and `bio` with the flag beside them, and every screen that renders another
-member's name or bio — lists, an Activity's organiser, an Act's author, a participant roster — has
-to read the flag and mask. No endpoint will refuse a client that skips it, and a client that skips
-it publishes text that was held back for review.
+real `display_name` and `bio` with the flag beside them. Every name or bio you render for another
+member comes from this table read — no function route returns another member's display name at all
+— so the flag is always there to check, on a profile screen, an Activity's organiser, an Act's
+author. No endpoint will refuse a client that skips it, and a client that skips it publishes text
+that was held back for review.
 
 `text_hidden` is read-only to clients, like the other moderation columns. Editing the display name
 or bio does not clear it — that is deliberate, or an author could lift a hide by editing until
